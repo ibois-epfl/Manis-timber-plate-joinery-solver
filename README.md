@@ -15,7 +15,7 @@ The tool allows:
 
 ### Reference
 For research applications, please refer to the following publication. It includes a detailed description of the algorithms behind the code: 
-> __Nicolas Rogeau, Pierre Latteur, Yves Weinand, _An integrated design tool for timber plate structures to generate joints geometry, fabrication toolpath, and robot trajectories_, Automation in Construction, 2021__
+> __Nicolas Rogeau, Pierre Latteur, Yves Weinand, _An integrated design tool for timber plate structures to generate joints geometry, fabrication toolpath, and robot trajectories_, Automation in Construction, Volume 130, October 2021 [https://doi.org/10.1016/j.autcon.2021.103875](link)__
 
 ## For users
 
