@@ -6,26 +6,13 @@ Classes:
     - Module : inherits from model, sub-sequence, insertion vectors...
     - Plate : thickness, contour, plane, normal...
     - ToolBox : geometry function for rhino objects
-    - Basics : geometry function independant of Rhino
-
-TO DO:
-    - Use insertion space instead of average or first
-    - Discard SS connections which are not sharing an edge 
-    - add an option to convert a datatree of objects to a sequence
-    - Make transform work on modules
-    - Make a component for milling contours
-    - Check plate faces orientation before playing with it
-    - Check potential problem in set attributes components
-    - Make it work for half lap joints if the contact volume cut plate faces in two
-    - Plates that are two contacts with the same neighbors
-    - joints ideas: common dovetail, butterfly, tusked tenon
 """
 
 __author__ = "Nicolas Rogeau"
 __laboratory__ = "IBOIS, Laboratory for Timber Construction" 
 __university__ = "EPFL, Ecole Polytechnique Federale de Lausanne"
 __funding__ = "NCCR Digital Fabrication, ETH Zurich"
-__version__ = "2020.01"
+__version__ = "2021.09.23"
 
 import rhinoscriptsyntax as rs
 import Rhino.Geometry as rg
@@ -49,7 +36,7 @@ if date.today() > date(2020, 1, 1):
         
         class PlateModel:
 
-            def __init__(self, breps, sequence=0, constraints=[None,None,None,None,None], discard=None):
+            def __init__(self, breps, sequence=0, constraints=[None,None,None,None,None], discard=[]):
 
                     # INITIALIZATION -------------------------------------
 
@@ -79,8 +66,16 @@ if date.today() > date(2020, 1, 1):
 
                     self.contact_vectors = []
                     self.modules = self.__get_modules_from_sequence()
+                    self.assembly_vectors = []
+                    self.assembly_spaces = []
+                    self.assembly_relatives = []
                     self.__get_assembly_vectors()
 
+
+                    # STRUCTURAL ANALYSIS --------------------------------
+
+                    self.FEM_joints = []
+                    self.FEM_plates = [plate.mid_contour for plate in self.plates]
 
             # MODEL INITIALIZATION ---------------------------------------
 
@@ -149,7 +144,7 @@ if date.today() > date(2020, 1, 1):
                 # module creation
                 modules = []
                 for i in range(len(sub_seq)):
-                    modules.append(PlateModules(self, i, sub_steps[i], str(sub_seq[i]), parents[i], children[i]))
+                    modules.append(PlateModule(self, i, sub_steps[i], str(sub_seq[i]), parents[i], children[i]))
                 return modules
 
             # MODEL TOPOLOGY ---------------------------------------------
@@ -160,10 +155,9 @@ if date.today() > date(2020, 1, 1):
                     sub = []
                     for j in range(self.count):
                         if i != j:
-
                             #discard
                             if ('('+str(i)+','+str(j)+')' == self.discard) or ('('+str(i)+','+str(j)+')' in self.discard) or ('('+str(j)+','+str(i)+')' == self.discard) or ('('+str(j)+','+str(i)+')' in self.discard):
-                                print("pair "+str(i)+","+str(j),"skipped")
+                                self.log.append("pair "+str(i)+","+str(j)+" skipped")
                             else: 
                                 intersect = rs.IntersectBreps(self.breps[i],self.breps[j])
                                 if intersect != None:
@@ -212,7 +206,7 @@ if date.today() > date(2020, 1, 1):
                             pj = copy.deepcopy(self.plates[brep_id])
                             intersect = rs.IntersectBreps(pi.brep,pj.brep)
                             if intersect !=  None:
-                                if len(intersect) == 1: 
+                                if len(intersect) == 1:
                                     if rs.IsCurveClosed(intersect) is True:
                                         if rs.IsCurvePlanar(intersect) is True:
                                             zone = rs.coercegeometry(rs.AddPlanarSrf(intersect)[0])
@@ -228,10 +222,10 @@ if date.today() > date(2020, 1, 1):
                                                             edges = Toolbox.Breps.brep_edges(volume)
                                                             edges.sort(key=rs.CurveLength)
                                                             edges.reverse()
-                                                            vec_dir = Toolbox.Vectors.round_vector(rs.VectorUnitize(Toolbox.Vectors.cross(pi.top_normal, pj.top_normal)),3)
+                                                            vec_dir = Toolbox.Vectors.round_vector(rs.VectorUnitize(Toolbox.Vectors.cross(pi.top_normal, pj.top_normal)),6)
                                                             four_edges = []
                                                             for edge in edges:
-                                                                vec_line = Toolbox.Vectors.round_vector(rs.VectorUnitize(Toolbox.Vectors.line_to_vec(edge)),3) 
+                                                                vec_line = Toolbox.Vectors.round_vector(rs.VectorUnitize(Toolbox.Vectors.line_to_vec(edge)),6) 
                                                                 if vec_dir == vec_line or vec_dir == rs.VectorReverse(vec_line):
                                                                     four_edges.append(edge)
                                                                 if len(four_edges) == 4: break
@@ -370,11 +364,15 @@ if date.today() > date(2020, 1, 1):
 
             def __get_contact_spheres(self, constraints):
 
+                if constraints.BranchCount != 5: constraints = [[],[],[],[],[]]
+                else: constraints = Toolbox.Data.datatree_to_list(constraints)
+
                 # Create canonic insertion space
                 sphere =  rs.AddSphere((0,0,0),1)
                 cutter = rs.AddPlanarSrf(rs.AddPolyline([(1,1,0),(1,-1,0),(-1,-1,0),(-1,1,0),(1,1,0)]))
                 hemisphere = rs.SplitBrep(sphere,cutter)[1]
-                hemicircle = rs.RotateObject(rs.AddArc(rs.WorldZXPlane(),1,180),(0,0,0),-90,(0,1,0))
+                hemicircle_horizontal = rs.RotateObject(rs.AddArc(rs.WorldZXPlane(),1,180),(0,0,0),-90,(0,1,0))
+                hemicircle_vertical = rs.RotateObject(rs.AddArc(rs.WorldYZPlane(),1,180),(0,0,0),0,(1,0,0))
                 normal_point= rs.AddPoint(0,0,1)
 
                 # Orient hemisphere on each conctact zone
@@ -383,34 +381,33 @@ if date.today() > date(2020, 1, 1):
                     sub = []
                     for j in range(len(self.contact_types[i])):
                         #face-to-face
-                        
                         if self.contact_types[i][j] == 'FF':
-                            if constraints[0] != None:
+                            if constraints[0] != []:
                                 insertion_space = constraints[0]
                             else: insertion_space = hemisphere
                         #face-to-side
                         elif (self.contact_types[i][j] == 'FS' or self.contact_types[i][j]  == 'SF'):
-                            if constraints[1] != None:
+                            if constraints[1] != []:
                                 insertion_space = constraints[1]
-                            else: insertion_space = hemicircle
+                            else: insertion_space = hemicircle_horizontal
                         #edge-to-side
                         elif (self.contact_types[i][j] == 'ES' or self.contact_types[i][j]  == 'SE'):
-                            if constraints[2] != None:
+                            if constraints[2] != []:
                                 insertion_space = constraints[2]
                             else: insertion_space = hemisphere
                         #side-to-side
                         elif self.contact_types[i][j] == 'SS':
-                            if constraints[3] != None:
+                            if constraints[3] != []:
                                 insertion_space = constraints[3]
-                            else: insertion_space = hemicircle
+                            else: insertion_space = hemicircle_vertical
                         #intersecting
                         elif self.contact_types[i][j] == 'IN':
-                            if constraints[4] != None:
+                            if constraints[4] != []:
                                 insertion_space = constraints[4]
                             else: insertion_space = normal_point
                                           
                         #Exception for SF/FS where the default constraint is oriented with the male plane
-                        if constraints[1] is None and (self.contact_types[i][j] == 'FS' or self.contact_types[i][j]  == 'SF'):
+                        if constraints[1] == [] and (self.contact_types[i][j] == 'FS' or self.contact_types[i][j]  == 'SF'):
                             nb = self.contact_ids[i][j]
                             if self.contact_types[i][j] == 'SF': male_normal = self.plates[i].top_plane.ZAxis
                             else: male_normal = self.plates[nb].top_plane.ZAxis
@@ -430,7 +427,7 @@ if date.today() > date(2020, 1, 1):
                             insertion_space = rs.TransformObject(insertion_space, matrix,True)
 
                         #Exception for SE/ES where the default constraint is trimmed by plate planes
-                        if constraints[2] is None and (self.contact_types[i][j] == 'ES' or self.contact_types[i][j]  == 'SE'):
+                        if constraints[2] == [] and (self.contact_types[i][j] == 'ES' or self.contact_types[i][j]  == 'SE'):
                             test_point = rs.CopyObject(self.contact_centers[i][j], - self.contact_planes[i][j].YAxis)
                             if self.contact_types[i][j] == 'SE':
                                 trim_plane = self.plates[i].mid_plane
@@ -463,12 +460,11 @@ if date.today() > date(2020, 1, 1):
                 iv = copy.deepcopy(sub_seq)
                 space = copy.deepcopy(sub_seq)
                 rel = copy.deepcopy(sub_seq)
-                gravity = rs.VectorCreate((0,0,-1),(0,0,0))
                 for i in range(len(sub_seq)):
                     for j in range(len(sub_seq[i])):
                         # first element in subsequence
                         if j == 0:
-                            iv[i][j] = gravity
+                            iv[i][j] = "gravity"
                             rel[i][j] = []
                             space[i][j] = []
 
@@ -528,7 +524,7 @@ if date.today() > date(2020, 1, 1):
 
                             # If plate/module has no contact, add a default vector and a support
                             if is_list == []:
-                                iv[i][j] = gravity
+                                iv[i][j] = "gravity"
                                 space[i][j] = []
                                 rel[i][j] = []
                                 self.modules[i].needed_supports += 1
@@ -543,13 +539,13 @@ if date.today() > date(2020, 1, 1):
                                     rel[i][j] = rel_list
                                 except:
                                     self.temp = is_list
-                                    iv[i][j] = gravity
+                                    iv[i][j] = "gravity"
                                     space[i][j] = []
                                     rel[i][j] = rel_list
                                     #raise Exception('Insertion space intersection returns no compatible vector for plate(s) '+str(sub_seq[i][j])+' with plates '+str(rel[i][j]))
 
                                 # if average vector failed or was null, take gravity instead
-                                if iv[i][j] == None: iv[i][j] = gravity
+                                if iv[i][j] == None: iv[i][j] = "gravity"
 
                 # Update modules attributes
                 for i in range(len(self.modules)):
@@ -587,6 +583,7 @@ if date.today() > date(2020, 1, 1):
                                                 search = False
 
                                         else:
+                                            
                                             if i < adj[i][j] and mod_seq[l] == adj[i][j]:
                                                 iv2[i][j] = corresponding_vector
                                                 rel2[i][j] = adj[i][j]
@@ -596,13 +593,18 @@ if date.today() > date(2020, 1, 1):
                                                 iv2[i][j] = rs.VectorReverse(corresponding_vector)
                                                 rel2[i][j] = adj[i][j]
                                                 search = False
-                self.assembly_relatives = rel2
+                #self.assembly_relatives = rel2
                 self.contact_vectors = iv2
-
+               
                 #coerce geometry of contact spheres to avoid guid instance problem.
                 for i in range(len(self.contact_spheres)):
                     for j in range(len(self.contact_spheres[i])):
                         self.contact_spheres[i][j]=rs.coercegeometry(self.contact_spheres[i][j])
+
+                #assign model attributes
+                self.assembly_vectors = self.modules[0].assembly_vectors
+                self.assembly_spaces = self.modules[0].assembly_spaces
+                self.assembly_relatives = self.modules[0].assembly_relatives
 
             def intersect_insertion_spaces(self, insertion_spaces):
                 """
@@ -868,7 +870,7 @@ if date.today() > date(2020, 1, 1):
                                 tile = scriptcontext.doc.Objects.Add(tile)    
 
                             for k in range(len(location)):
-                                
+
                                 #construction lines
                                 base_circle = tile
                                 if tile == False :
@@ -938,11 +940,8 @@ if date.today() > date(2020, 1, 1):
                 tenon_number=1.0, 
                 tenon_length='default', 
                 tenon_width=1.0, 
-                tenon_space=1.0,
-                tenon_shift=0.0,
-                tenon_angle=0.0,
-                assembly=True,
-                specific_vector=None):
+                tenon_spacing=1.0,
+                tenon_shift=0.0,):
 
                 """Add tenon and mortise on Side-to-Face or Face-to-Side contact zones."""
                 
@@ -990,29 +989,21 @@ if date.today() > date(2020, 1, 1):
                             top_contour_mstart = rs.CurveStartPoint(top_contour_male)
                             bottom_contour_mstart= rs.CurveStartPoint(bottom_contour_male)
                             
+                            """"""
                             #joint location
                             zone = self.contact_zones[i][j]
                             rectangle = Toolbox.Curves.trapeze_to_rectangle(rs.JoinCurves(rs.DuplicateEdgeCurves(zone)))
-                            if Toolbox.Curves.rectangle_dimensions(rectangle)[0] < (tenon_width*tenon_number + tenon_space*(tenon_number) + tenon_shift*2):
-                                excess = (tenon_width*tenon_number + tenon_space*(tenon_number) + tenon_shift*2) / (Toolbox.Curves.rectangle_dimensions(rectangle)[0]) * 100
+                            if Toolbox.Curves.rectangle_dimensions(rectangle)[0] < (tenon_width*tenon_number + tenon_spacing*(tenon_number-1) + tenon_shift*2):
+                                excess = (tenon_width*tenon_number + tenon_spacing*(tenon_number-1) + tenon_shift*2) / (Toolbox.Curves.rectangle_dimensions(rectangle)[0]) * 100
                                 raise Exception(' Joint is to large ('+ str(int(excess)) +' %) for contact area between plate '+str(i)+' and plate '+str(nb))
                             center = rs.CurveAreaCentroid(rectangle)[0]
                             default_direction = Toolbox.Vectors.project_vector_to_plane(plane_zone.ZAxis, plane_male)
                             joint_plane = rs.PlaneFromNormal(center, plane_male.ZAxis, default_direction)
 
-                            #force direction for assembly
-                            #if assembly is True:
+                            #direction for assembly
                             if types[j] == 'FS': direction = self.contact_vectors[i][j]
                             if types[j] == 'SF': direction = -self.contact_vectors[i][j]
 
-                            #tenon rotation
-                            #else: 
-                            #    direction = rs.VectorRotate(default_direction, tenon_angle, joint_plane[3])
-                            #    self.contact_vectors[nb] = direction
-
-                            if specific_vector != None: 
-                                direction = specific_vector
-                            
                             #default length
                             if (tenon_length == 'default') or (tenon_length == 0) :
                                 alpha = rs.VectorAngle(direction, plane_female[3])
@@ -1021,7 +1012,7 @@ if date.today() > date(2020, 1, 1):
                             
                             #tenon location
                             if tenon_number > 1 :
-                                dist = (float(tenon_number-1) /2) * (tenon_width + tenon_space)
+                                dist = (float(tenon_number-1) /2) * (tenon_width + tenon_spacing)
                                 pointA = rs.CopyObject(joint_plane.Origin, joint_plane.YAxis * dist)
                                 pointB = rs.CopyObject(joint_plane.Origin, -joint_plane.YAxis * dist)
                                 line = rs.AddLine(pointA, pointB)
@@ -1044,12 +1035,12 @@ if date.today() > date(2020, 1, 1):
                                 bottom_poly = rs.CopyObject(polyline, rs.VectorCreate(bottom_point, joint_plane.Origin))
                                 tenon_box = rs.coercebrep(Toolbox.Breps.box_from_2_poly(top_poly, bottom_poly))
 
-                                #slice joint if forced assembly
-                                if assembly is True: 
-                                    top_plane = rs.coerceplane(self.plates[i].top_plane)
-                                    bottom_plane =  rs.coerceplane(self.plates[i].bottom_plane)
-                                    tenon_box = Toolbox.Breps.slice_2_planes(tenon_box, top_plane, bottom_plane)
-
+                                """
+                                #slice joint
+                                top_plane = rs.coerceplane(self.plates[i].top_plane)
+                                bottom_plane =  rs.coerceplane(self.plates[i].bottom_plane)
+                                tenon_box = Toolbox.Breps.slice_2_planes(tenon_box, top_plane, bottom_plane)
+                                """
                                 #append
                                 self.plates[male].joints_positives.append(rs.coercebrep(rs.CopyObject(tenon_box)))
                                 self.plates[female].joints_negatives.append(rs.coercebrep(rs.CopyObject(tenon_box)))
@@ -1058,13 +1049,13 @@ if date.today() > date(2020, 1, 1):
                             for k in range(len(location)):
 
                                 # male part
-                                point1 = rs.CopyObject(location[k], joint_plane.YAxis * (tenon_width/2 + tenon_space/2))
+                                point1 = rs.CopyObject(location[k], joint_plane.YAxis * (tenon_width/2 + tenon_spacing/2))
                                 point2 = rs.CopyObject(location[k], joint_plane.YAxis * tenon_width/2)
                                 point5 = rs.CopyObject(location[k], -joint_plane.YAxis * tenon_width/2)
-                                point6 = rs.CopyObject(location[k], -joint_plane.YAxis * (tenon_width/2 + tenon_space/2))
+                                point6 = rs.CopyObject(location[k], -joint_plane.YAxis * (tenon_width/2 + tenon_spacing/2))
                                 point3 = rs.CopyObject(point2, direction * new_tenon_length)
                                 point4 = rs.CopyObject(point5, direction * new_tenon_length)
-                                polyline = rs.AddPolyline([point1, point2, point3, point4, point5, point6])
+                                polyline = rs.AddPolyline([point2, point3, point4, point5])
                                 top_point = Toolbox.Curves.curve_closest_point(top_contour_male, joint_plane.Origin)
                                 top_poly = rs.CopyObject(polyline, rs.VectorCreate(top_point, joint_plane.Origin))
                                 bottom_point = Toolbox.Curves.curve_closest_point(bottom_contour_male, joint_plane.Origin)
@@ -1074,15 +1065,15 @@ if date.today() > date(2020, 1, 1):
 
                                 # female part
                                 mod = 0
-                                if tenon_space < 0.0001 : mod = -1
-                                point1 = rs.PolylineVertices(top_poly)[1 + mod]
-                                point2 = rs.PolylineVertices(top_poly)[4 + mod]
-                                point3 = rs.PolylineVertices(bottom_poly)[4 + mod]
-                                point4 = rs.PolylineVertices(bottom_poly)[1 + mod]
-                                point5 = rs.PolylineVertices(top_poly)[2 + mod]
-                                point6 = rs.PolylineVertices(top_poly)[3 + mod]
-                                point7 = rs.PolylineVertices(bottom_poly)[3 + mod]
-                                point8 = rs.PolylineVertices(bottom_poly)[2 + mod]
+                                if tenon_spacing < 0.0001 : mod = -1
+                                point1 = rs.PolylineVertices(top_poly)[0 + mod]
+                                point2 = rs.PolylineVertices(top_poly)[3 + mod]
+                                point3 = rs.PolylineVertices(bottom_poly)[3 + mod]
+                                point4 = rs.PolylineVertices(bottom_poly)[0 + mod]
+                                point5 = rs.PolylineVertices(top_poly)[1 + mod]
+                                point6 = rs.PolylineVertices(top_poly)[2 + mod]
+                                point7 = rs.PolylineVertices(bottom_poly)[2 + mod]
+                                point8 = rs.PolylineVertices(bottom_poly)[1 + mod]
                                 top_poly = rs.AddPolyline([point1, point2, point3, point4, point1])
                                 bottom_poly = rs.AddPolyline([point5, point6, point7, point8, point5])
                                 self.plates[female].top_holes.append(rs.coercecurve(top_poly))
@@ -1090,6 +1081,20 @@ if date.today() > date(2020, 1, 1):
                             
                             self.log.append('Tenon joint added bewteen plates '+str(i)+ ' and '+ str(nb))
 
+                            # Structural analysis
+
+                            for k in range(len(location)):
+                                pm=rs.CurveClosestPoint(self.FEM_plates[male],location[k])
+                                pf=rs.CurveClosestPoint(self.FEM_plates[female],location[k])
+                                self.FEM_plates[male] = scriptcontext.doc.Objects.Add(self.FEM_plates[male])
+                                self.FEM_plates[female] = scriptcontext.doc.Objects.Add(self.FEM_plates[female])
+                                joint_line = rs.AddLine(rs.EvaluateCurve(self.FEM_plates[male],pm), rs.EvaluateCurve(self.FEM_plates[female],pf))
+                                rs.InsertCurveKnot(self.FEM_plates[male],pm)
+                                rs.InsertCurveKnot(self.FEM_plates[female],pf)
+                                self.FEM_plates[male] = rs.coercecurve(self.FEM_plates[male])
+                                self.FEM_plates[female] = rs.coercecurve(self.FEM_plates[female])
+                                self.FEM_joints.append(rs.coercecurve(joint_line))
+                                
                             pass
 
             @__skip_nones
@@ -1098,7 +1103,7 @@ if date.today() > date(2020, 1, 1):
                 tenon_number=2.0, 
                 tenon_length='default', 
                 tenon_width=10.0, 
-                tenon_space=10.0,
+                tenon_spacing=10.0,
                 tenon_shift=0.0,
                 side_tolerance=0.0,
                 top_tolerance=0.0,
@@ -1151,8 +1156,8 @@ if date.today() > date(2020, 1, 1):
                             #joint location
                             zone = self.contact_zones[i][j]
                             rectangle = Toolbox.Curves.trapeze_to_rectangle(rs.JoinCurves(rs.DuplicateEdgeCurves(zone)))
-                            if Toolbox.Curves.rectangle_dimensions(rectangle)[0] < (tenon_width*tenon_number + tenon_space*(tenon_number) + tenon_shift*2):
-                                excess = (tenon_width*tenon_number + tenon_space*(tenon_number) + tenon_shift*2) / (Toolbox.Curves.rectangle_dimensions(rectangle)[0]) * 100
+                            if Toolbox.Curves.rectangle_dimensions(rectangle)[0] < (tenon_width*tenon_number + tenon_spacing*(tenon_number) + tenon_shift*2):
+                                excess = (tenon_width*tenon_number + tenon_spacing*(tenon_number) + tenon_shift*2) / (Toolbox.Curves.rectangle_dimensions(rectangle)[0]) * 100
                                 raise Exception(' Joint is to large ('+ str(int(excess)) +' %) for contact area between plate '+str(i)+' and plate '+str(nb))
                             center = rs.CurveAreaCentroid(rectangle)[0]
                             default_direction = Toolbox.Vectors.project_vector_to_plane(plane_zone.ZAxis, plane_male)
@@ -1170,7 +1175,7 @@ if date.today() > date(2020, 1, 1):
                             
                             #tenon location
                             if tenon_number > 1 :
-                                dist = (float(tenon_number-1) /2) * (tenon_width + tenon_space)
+                                dist = (float(tenon_number-1) /2) * (tenon_width + tenon_spacing)
                                 pointA = rs.CopyObject(joint_plane.Origin, joint_plane.YAxis * dist)
                                 pointB = rs.CopyObject(joint_plane.Origin, -joint_plane.YAxis * dist)
                                 line = rs.AddLine(pointA, pointB)
@@ -1226,10 +1231,10 @@ if date.today() > date(2020, 1, 1):
                             for k in range(len(location)):
 
                                 # male part
-                                mpoint1 = rs.CopyObject(location[k], joint_plane.YAxis * (tenon_width/2 + tenon_space/2))
+                                mpoint1 = rs.CopyObject(location[k], joint_plane.YAxis * (tenon_width/2 + tenon_spacing/2))
                                 mpoint2 = rs.CopyObject(location[k], joint_plane.YAxis * tenon_width/2)
                                 mpoint5 = rs.CopyObject(location[k], -joint_plane.YAxis * tenon_width/2)
-                                mpoint6 = rs.CopyObject(location[k], -joint_plane.YAxis * (tenon_width/2 + tenon_space/2))
+                                mpoint6 = rs.CopyObject(location[k], -joint_plane.YAxis * (tenon_width/2 + tenon_spacing/2))
                                 mpoint3 = rs.CopyObject(mpoint2, direction * (new_tenon_length) + (side_tolerance * -joint_plane.YAxis))
                                 mpoint4 = rs.CopyObject(mpoint5, direction * (new_tenon_length) + (side_tolerance * joint_plane.YAxis))
                                 
@@ -1250,7 +1255,7 @@ if date.today() > date(2020, 1, 1):
                                 # modifier for null space
                                 # if space is null, tenon polyline is made out of 4 points instead of 6 (indices need to change)    
                                 mod = 0
-                                if tenon_space < 0.0001 : mod = -1
+                                if tenon_spacing < 0.0001 : mod = -1
 
                                 #change poly with top and bottom chamfer
                                 top_vertices = rs.PolylineVertices(mtop_poly)
@@ -1320,71 +1325,23 @@ if date.today() > date(2020, 1, 1):
 
                             pass
 
-          
             @__skip_nones                   
             def add_sunrise(self,
                 plates_pairs='all', 
                 tenon_number=2, 
                 tenon_width=1.0,
-                tenon_space=1.0,
+                tenon_spacing=1.0,
+                tenon_shift=0.0,
                 spread_angle=0.0,
-                custom_insertion=None,
-                flip=True):
+                parallel_tenons=False,
+                custom_insertion=None):
                 """ Add a sunrise dovetail on Edgewise contact zones."""
-                
-                #builder functions
-                
-                def create_joint_curves(origin, x, y, z, phi_offset, width, l, thickness, spacing, angle, n, vi):
-                    ######## Creation of the construction parameters ########
-                    lj = n * (width + spacing) - spacing  # Length of the joint
-                    ys_k = Basics.get_yks(vi, y, angle, n)  # y vector of each finger plate to orient the plane
-                    
-                    # projection of the x axis on the yk, vi plane with respect to the y axis
-                    xs_k = tuple([Basics.project(yk, vi, x, y) for yk in ys_k])
-                    # Unitize the vector along the x direction
-                    xs_k = tuple([tuple([comp / Basics.dot(xk, x) for comp in xk]) for xk in xs_k])
-                    
-                    # projection of the z axis on the yk, vi plane with respect to the y axis
-                    zs_k = tuple([Basics.project(yk, vi, z, y) for yk in ys_k])
-                    # Unitize the vector along the y direction
-                    zs_k = tuple([tuple([comp / Basics.dot(zk, z) for comp in zk]) for zk in zs_k])
-
-                    ######## Construction of the points of the joint ########
-                    # Start points of the fingers at the center of the joint
-                    pts_top_4k = [tuple([oi + ((width + spacing) * k - 0.5 * lj) * yi + 0.5 * thickness * zi - .5 * phi_offset * x_i
-                                        for yi, oi, zi, x_i in zip(y, origin, z, x)])
-                                for k in range(n)]
-
-                    # Top curve points creation from middle start points
-                    # pts_top_4k = [tuple([pti + thickness * (z_ki - 0.5 * zi) for pti, z_ki, zi in zip(pt, z_k, z)])
-                    #              for pt, z_k in zip(pts_mid_4k, zs_k)]
-                    pts_top_4k1 = [tuple([pti + l * x_ki for pti, x_ki in zip(pt, x_k)])
-                                for pt, x_k in zip(pts_top_4k, xs_k)]
-                    pts_top_4k2 = [tuple([pti + width * yi for pti, yi in zip(pt, y)])
-                                for pt in pts_top_4k1]
-                    pts_top_4k3 = [tuple([pti + width * yi for pti, yi in zip(pt, y)])
-                                for pt in pts_top_4k]
-                    # Merging lists of points correctly
-                    pts_top = tuple(zip(pts_top_4k, pts_top_4k1, pts_top_4k2, pts_top_4k3))
-
-                    # Create bottom curve by translating the top curve
-                    pts_bottom = [[pti + 1 * phi_offset * x_ki - thickness * z_ki for pti, z_ki, x_ki in zip(pt, zs_k[i], xs_k[i])]
-                                for i, pts in enumerate(pts_top) for pt in pts]
-
-                    # Moving top curve to center origin on the joint
-                    pts_top = [[pti - .0 * phi_offset * x_ki for pti, x_ki in zip(pt, xs_k[i])]
-                            for i, pts in enumerate(pts_top) for pt in pts]
-
-                    return (pts_bottom,
-                            pts_top,[rg.Point3d(*point) for point in pts_top_4k])
-
+                              
                 #cast plate_pairs to string
                 if plates_pairs != 'all':
                     for i in range(len(plates_pairs)):
                         plates_pairs[i] = str(plates_pairs[i])
                 
-                spread_angle = (spread_angle/360)*2*math.pi
-
                 #conditional loop
                 for i in range(self.count):
                     types = self.contact_types[i]
@@ -1402,101 +1359,124 @@ if date.today() > date(2020, 1, 1):
 
                         # For all specified Edgewise connection
                         if (types[j] in 'SES') and (nb > i) and i_want_a_tenon is True:
-                            
+                                                        
                             # Prerequisite
-                            if tenon_number < 2 : raise Exception('tenon_number must be greater than 1')
+                            if tenon_number < 1 : raise Exception('tenon_number must be greater than 1')
                             if tenon_width <= 0 : raise Exception('tenon_width must be greater than 0')
-                            if tenon_space <= 0 : raise Exception('tenon_space must be greater than 0')
+                            if tenon_spacing <= 0 : raise Exception('tenon_spacing must be greater than 0')
 
-                            # Male-female parameters
+                            #deal with male/female
+                            nb = self.contact_ids[i][j]
                             if types[j] == 'SE':
-                                male = i
-                                female = nb
-                            if types[j] == 'ES':
-                                male = nb
-                                female = i
-                            plane_male = self.plates[male].top_plane
-                            plane_female = self.plates[female].top_plane
-                            thickness_male = self.plates[male].thickness
-                            thickness_female = self.plates[female].thickness
-                            
-                            # Joint location
-                            zone = self.contact_zones[i][j]
-                            center = self.contact_centers[i][j]
-                            cp = self.contact_planes[i][j]
+                                spread_angle=-spread_angle
+                                male, female = i, nb
+                            else: male, female = nb, i
 
-                            # Construction planes
-                            z2=cp.ZAxis
-                            x2 = cp.YAxis
-                            testx2 = rs.CopyObject(center, 2*self.plates[female].thickness * rs.VectorUnitize(x2))
-                            if rg.Brep.IsPointInside(self.plates[female].brep, rs.coerce3dpoint(testx2), 0.1, False): 
-                                x2 = -x2
-                            y2 = rs.VectorCrossProduct(z2,x2)
-                            y1 = -y2
-                            z1 = plane_male.ZAxis
-                            x1 = rs.VectorCrossProduct(y1,z1)
-                            testx1 = rs.CopyObject(center, 2 * self.plates[female].thickness * rs.VectorUnitize(x1))
-                            if rg.Brep.IsPointInside(self.plates[male].brep, rs.coerce3dpoint(testx1), 0.1, True) is True:
-                                x1 = -x1
-                                z1 = -z1
-                            p1 = rs.PlaneFromFrame(center, x1,-y1)
-                            p2 = rs.PlaneFromFrame(center, x2,-y2)
-                            
-                            # insertion vector
-                            vi = self.contact_vectors[i][j]
-                            if custom_insertion != None: vi = custom_insertion
-                            
-                            # Alex parameters
-                            l = thickness_female
-                            x, y, z = (tuple(p1.XAxis), tuple(p1.YAxis), tuple(p1.ZAxis))
-                            o = center  # Center of the joint
-                            vi = Basics.unitize(tuple(vi))  # Ensure vi is unit length
-                            phi = Basics.angle(x, tuple(p2.XAxis), z)  # Angle between the two plates
-                            phi_lim = 0  # Limit to avoid near 0 angle problem
-
-                            # Offset in x direction due to angle in contact face
-                            pi = math.pi
-                            if phi_lim < phi < pi - phi_lim:
-                                if phi <= .5 * pi:
-                                    phi_offset = -(thickness_male ** 2. * (math.sin(phi) ** -2. - 1)) ** .5
+                            #compute plane angles
+                            angles = []
+                            if parallel_tenons is True:
+                                if tenon_number == 1: angles = [0,0]
                                 else:
-                                    phi_offset = (thickness_male ** 2. * (math.sin(phi) ** -2. - 1)) ** .5
-                                l = thickness_female / math.sin(phi)
+                                    for k in range(tenon_number):
+                                        angles.append(- spread_angle + 2*k*spread_angle/(tenon_number-1))
+                                        angles.append(- spread_angle + 2*k*spread_angle/(tenon_number-1))
                             else:
-                                l = thickness_female
-                                phi_offset = 0.
+                                for k in range(2*tenon_number):
+                                    angles.append(- spread_angle + 2*k*(spread_angle/(2*tenon_number-1)))
 
-                            # Joint contour
-                            pts_bottom, pts_top, m = create_joint_curves(o, x, y, z, phi_offset, tenon_width, l, thickness_male, tenon_space, spread_angle, tenon_number, vi)
-                            if phi_lim < phi < pi - phi_lim:
-                                pts_bottom_flip, pts_top_flip = Basics.flip_crv(pts_top, pts_bottom)
-                            else:
-                                pts_bottom_flip, pts_top_flip = list(pts_bottom), list(pts_top)
-                            # flip top and bottom polylines if necessary
-                            if rs.CurveCurveIntersection(self.plates[male].top_contour, rs.AddPolyline(pts_top),0.1) == None:
-                                pts_top, pts_bottom = pts_bottom, pts_top
-                            if rs.CurveCurveIntersection(self.plates[female].top_contour, rs.AddPolyline(pts_top_flip),0.1) == None:
-                                pts_top_flip, pts_bottom_flip = pts_bottom_flip, pts_top_flip
+                            #tenon locations
+                            cp = self.contact_planes[i][j]
+                            if tenon_number > 1 :
+                                dist = (float(tenon_number-1) /2) * (tenon_width + tenon_spacing)
+                                pointA = rs.CopyObject(cp.Origin, cp.XAxis * dist)
+                                pointB = rs.CopyObject(cp.Origin, -cp.XAxis * dist)
+                                line = rs.AddLine(pointA, pointB)
+                                shifted_line = rs.CopyObject(line, cp.XAxis * tenon_shift)
+                                location = rs.DivideCurve(shifted_line, tenon_number-1)
+                            else: location = [rs.CopyObject(cp.Origin, cp.XAxis * tenon_shift)]
 
-                            # insert top and bottom polyines inside male and female contours
-                            self.plates[male].top_contour = Toolbox.Curves.insert_curves(self.plates[male].top_contour, [rs.AddPolyline(pts_top)])
-                            self.plates[male].bottom_contour = Toolbox.Curves.insert_curves(self.plates[male].bottom_contour, [rs.AddPolyline(pts_bottom)])
-                            self.plates[female].top_contour = Toolbox.Curves.insert_curves(self.plates[female].top_contour, [rs.AddPolyline(pts_top_flip)])
-                            self.plates[female].bottom_contour = Toolbox.Curves.insert_curves(self.plates[female].bottom_contour, [rs.AddPolyline(pts_bottom_flip)])
+                            #get insertion vector
+                            vec = self.contact_vectors[i][j]
+                            if custom_insertion != None: vec=custom_insertion
 
-                            #joint solid
+                            #get and reorder top/bottom
+                            tpf = self.plates[female].top_plane
+                            bpf = self.plates[female].bottom_plane
+                            if rs.Distance(tpf.Origin, cp.Origin) < rs.Distance(bpf.Origin, cp.Origin):
+                                self.switch_top_bottom(plates=[female])
+                            tpm = self.plates[male].top_plane
+                            bpm = self.plates[male].bottom_plane
+                            tcf = self.plates[female].top_center
+                            bcf = self.plates[female].bottom_center
+                            if rs.Distance(tpm.Origin, bcf) < rs.Distance(bpm.Origin, bcf):
+                                self.switch_top_bottom(plates=[male])
+                                tpm = self.plates[male].top_plane
+                                bpm = self.plates[male].bottom_plane
+
+                            #create tenons
+                            m_poly_top=[]
+                            m_poly_bottom=[]
+                            f_poly_top=[]
+                            f_poly_bottom=[]
                             for k in range(tenon_number):
-                                box = Toolbox.Breps.box_from_2_poly(rs.AddPolyline(pts_top[4*k:4*k+4]), rs.AddPolyline(pts_bottom[4*k:4*k+4]))
-                                self.plates[male].joints_positives.append(rs.coercebrep(box))
-                                self.plates[female].joints_negatives.append(rs.coercebrep(box))
-                            
+                                #plane_location
+                                rot_vec_1 = rs.VectorRotate(cp.YAxis, angles[2*k], cp.ZAxis)
+                                rot_vec_2 = rs.VectorRotate(cp.YAxis, angles[2*k+1], cp.ZAxis)
+                                loc1= rs.CopyObject(location[k], cp.XAxis * tenon_width/2)
+                                loc2= rs.CopyObject(location[k], cp.XAxis * -tenon_width/2)                              
+                                pl1 = rs.PlaneFromFrame(loc1,vec,rot_vec_1)
+                                pl2 = rs.PlaneFromFrame(loc2,vec,rot_vec_2)
+                                if rs.IsVectorParallelTo(cp.YAxis, vec) !=0:
+                                    pl1 = rs.PlaneFromFrame(loc1,vec,cp.ZAxis)
+                                    pl2 = rs.PlaneFromFrame(loc2,vec,cp.ZAxis)
 
+                                #solid creation                               
+                                solid = rs.coercebrep(Toolbox.Breps.box_from_6_planes([pl1,pl2],[tpm,bpm],[tpf,bpf]))
+                                if solid.SolidOrientation == rg.BrepSolidOrientation.Inward: rg.Brep.Flip(solid) 
+                                self.plates[male].joints_positives.append(copy.deepcopy(solid))
+                                self.plates[female].joints_negatives.append(copy.deepcopy(solid))
+                                #contour creation
+                                m_poly_top.append(Toolbox.Planes.three_planes_intersection(bpf,tpm,pl1))
+                                m_poly_top.append(Toolbox.Planes.three_planes_intersection(tpf,tpm,pl1))
+                                m_poly_top.append(Toolbox.Planes.three_planes_intersection(tpf,tpm,pl2))
+                                m_poly_top.append(Toolbox.Planes.three_planes_intersection(bpf,tpm,pl2))
+                                m_poly_bottom.append(Toolbox.Planes.three_planes_intersection(bpf,bpm,pl1))
+                                m_poly_bottom.append(Toolbox.Planes.three_planes_intersection(tpf,bpm,pl1))
+                                m_poly_bottom.append(Toolbox.Planes.three_planes_intersection(tpf,bpm,pl2))
+                                m_poly_bottom.append(Toolbox.Planes.three_planes_intersection(bpf,bpm,pl2))
+                                f_poly_top.append(Toolbox.Planes.three_planes_intersection(tpm,tpf,pl1))
+                                f_poly_top.append(Toolbox.Planes.three_planes_intersection(bpm,tpf,pl1))
+                                f_poly_top.append(Toolbox.Planes.three_planes_intersection(bpm,tpf,pl2))
+                                f_poly_top.append(Toolbox.Planes.three_planes_intersection(tpm,tpf,pl2))
+                                f_poly_bottom.append(Toolbox.Planes.three_planes_intersection(tpm,bpf,pl1))
+                                f_poly_bottom.append(Toolbox.Planes.three_planes_intersection(bpm,bpf,pl1))
+                                f_poly_bottom.append(Toolbox.Planes.three_planes_intersection(bpm,bpf,pl2))
+                                f_poly_bottom.append(Toolbox.Planes.three_planes_intersection(tpm,bpf,pl2))
+                            self.plates[male].top_contour = Toolbox.Curves.insert_curves(self.plates[male].top_contour, [rs.AddPolyline(m_poly_top)])
+                            self.plates[male].bottom_contour = Toolbox.Curves.insert_curves(self.plates[male].bottom_contour, [rs.AddPolyline(m_poly_bottom)])
+                            self.plates[female].top_contour = Toolbox.Curves.insert_curves(self.plates[female].top_contour, [rs.AddPolyline(f_poly_top)])
+                            self.plates[female].bottom_contour = Toolbox.Curves.insert_curves(self.plates[female].bottom_contour, [rs.AddPolyline(f_poly_bottom)])
+                            
+                            # Structural analysis
+
+                            for k in range(len(location)):
+                                pm=rs.CurveClosestPoint(self.FEM_plates[male],location[k])
+                                pf=rs.CurveClosestPoint(self.FEM_plates[female],location[k])
+                                self.FEM_plates[male] = scriptcontext.doc.Objects.Add(self.FEM_plates[male])
+                                self.FEM_plates[female] = scriptcontext.doc.Objects.Add(self.FEM_plates[female])
+                                joint_line = rs.AddLine(rs.EvaluateCurve(self.FEM_plates[male],pm), rs.EvaluateCurve(self.FEM_plates[female],pf))
+                                rs.InsertCurveKnot(self.FEM_plates[male],pm)
+                                rs.InsertCurveKnot(self.FEM_plates[female],pf)
+                                self.FEM_plates[male] = rs.coercecurve(self.FEM_plates[male])
+                                self.FEM_plates[female] = rs.coercecurve(self.FEM_plates[female])
+                                self.FEM_joints.append(rs.coercecurve(joint_line))
+                            
             @__skip_nones
             def add_custom_FS_joints(self, 
                 plates_pairs='all', 
                 joint_number=2.0, 
                 joint_width=10.0, 
-                joint_space=10.0,
+                joint_spacing=10.0,
                 joint_shift=0.0,
                 joint_drawing=None,
                 hole_sides=[],
@@ -1579,14 +1559,14 @@ if date.today() > date(2020, 1, 1):
                             # Joint location
                             zone = self.contact_zones[i][j]
                             rectangle = Toolbox.Curves.trapeze_to_rectangle(rs.JoinCurves(rs.DuplicateEdgeCurves(zone)))
-                            if Toolbox.Curves.rectangle_dimensions(rectangle)[0] < (joint_width*joint_number + joint_space*(joint_number) + joint_shift*2):
-                                excess = (joint_width*joint_number + joint_space*(joint_number) + joint_shift*2) / (Toolbox.Curves.rectangle_dimensions(rectangle)[0]) * 100
+                            if Toolbox.Curves.rectangle_dimensions(rectangle)[0] < (joint_width*joint_number + joint_spacing*(joint_number) + joint_shift*2):
+                                excess = (joint_width*joint_number + joint_spacing*(joint_number) + joint_shift*2) / (Toolbox.Curves.rectangle_dimensions(rectangle)[0]) * 100
                                 raise Exception(' Joint is to large ('+ str(int(excess)) +' %) for contact area between plate '+str(i)+' and plate '+str(nb))
                             center = rs.CurveAreaCentroid(rectangle)[0]
                             default_direction = Toolbox.Vectors.project_vector_to_plane(plane_zone.ZAxis, plane_male)
                             joint_plane = rs.PlaneFromNormal(center, plane_male.ZAxis, default_direction)
                             if joint_number > 1 :
-                                dist = (float(joint_number-1) /2) * (joint_width + joint_space)
+                                dist = (float(joint_number-1) /2) * (joint_width + joint_spacing)
                                 pointA = rs.CopyObject(joint_plane.Origin, joint_plane.YAxis * dist)
                                 pointB = rs.CopyObject(joint_plane.Origin, -joint_plane.YAxis * dist)
                                 line = rs.AddLine(pointA, pointB)
@@ -1687,7 +1667,7 @@ if date.today() > date(2020, 1, 1):
                 if plates_pairs != 'all':
                     for i in range(len(plates_pairs)):
                         plates_pairs[i] = str(plates_pairs[i])
-                
+
                 #conditional loop
                 for i in range(self.count):
                     types = self.contact_types[i]
@@ -1711,9 +1691,10 @@ if date.today() > date(2020, 1, 1):
                             #joint location
                             zone = self.contact_zones[i][j]
                             rectangle = Toolbox.Curves.trapeze_to_rectangle(rs.JoinCurves(rs.DuplicateEdgeCurves(zone)))
-                            if Toolbox.Curves.rectangle_dimensions(rectangle)[0] < (finger_width_1*finger_number_1 + finger_width_2*finger_number_2 + finger_spacing*(finger_number_1+finger_number_2) + finger_shift*2):
-                                excess = (finger_width_1*finger_number_1 + finger_width_2*finger_number_2 + finger_spacing*(finger_number_1+finger_number_2) + finger_shift*2) / (Toolbox.Curves.rectangle_dimensions(rectangle)[0]) * 100
+                            if Toolbox.Curves.rectangle_dimensions(rectangle)[0] < (finger_width_1*finger_number_1 + finger_width_2*finger_number_2 + 2*finger_spacing*(finger_number_1+finger_number_2-1) + finger_shift*2):
+                                excess = (finger_width_1*finger_number_1 + finger_width_2*finger_number_2 + 2*finger_spacing*(finger_number_1+finger_number_2-1) + finger_shift*2) / (Toolbox.Curves.rectangle_dimensions(rectangle)[0]) * 100
                                 raise Exception(' Joint is to large ('+ str(int(excess)) +' %) for contact area between plate '+str(i)+' and plate '+str(nb))
+
                             plane_male = self.plates[i].top_plane
                             plane_female = self.plates[nb].top_plane
                             center = self.contact_centers[i][j]
@@ -1749,11 +1730,11 @@ if date.today() > date(2020, 1, 1):
                             if (finger_number_1 + finger_number_2) % 2 == 0:
                                 #alternate
                                 if mirror is False:
-                                    center_1 = rs.CopyObject(joint_plane.Origin, joint_plane.XAxis * (finger_spacing/2 + finger_width_2) /2)
-                                    center_2 = rs.CopyObject(joint_plane.Origin, -joint_plane.XAxis * (finger_spacing/2 + finger_width_1) /2)
+                                    center_1 = rs.CopyObject(joint_plane.Origin, joint_plane.XAxis * (finger_spacing + finger_width_2) /2)
+                                    center_2 = rs.CopyObject(joint_plane.Origin, -joint_plane.XAxis * (finger_spacing + finger_width_1) /2)
                                 else: 
-                                    center_1 = rs.CopyObject(joint_plane.Origin, -joint_plane.XAxis * (finger_spacing/2 + finger_width_2) /2)
-                                    center_2 = rs.CopyObject(joint_plane.Origin, joint_plane.XAxis * (finger_spacing/2 + finger_width_1) /2)
+                                    center_1 = rs.CopyObject(joint_plane.Origin, -joint_plane.XAxis * (finger_spacing + finger_width_2) /2)
+                                    center_2 = rs.CopyObject(joint_plane.Origin, joint_plane.XAxis * (finger_spacing + finger_width_1) /2)
                             else: 
                                 #centered
                                 center_1 = joint_plane.Origin
@@ -1761,7 +1742,7 @@ if date.today() > date(2020, 1, 1):
                             
                             #finger location - first side
                             if finger_number_1 > 1 :
-                                dist = (float(finger_number_1 -1) /2) * (finger_width_1 + finger_width_2 + finger_spacing)
+                                dist = (float(finger_number_1 -1) /2) * (finger_width_1 + finger_width_2 + 2*finger_spacing)
                                 pointA = rs.CopyObject(center_1, joint_plane.XAxis * dist)
                                 pointB = rs.CopyObject(center_1, -joint_plane.XAxis * dist)
                                 line = rs.AddLine(pointA, pointB)
@@ -1771,7 +1752,7 @@ if date.today() > date(2020, 1, 1):
                             
                             #finger location - second side
                             if finger_number_2 > 1 :
-                                dist = (float(finger_number_2 -1) /2) * (finger_width_1 + finger_width_2 + finger_spacing)
+                                dist = (float(finger_number_2 -1) /2) * (finger_width_1 + finger_width_2 +2*finger_spacing)
                                 pointA = rs.CopyObject(center_2, joint_plane.XAxis * dist)
                                 pointB = rs.CopyObject(center_2, -joint_plane.XAxis * dist)
                                 line = rs.AddLine(pointA, pointB)
@@ -1781,6 +1762,7 @@ if date.today() > date(2020, 1, 1):
 
                             #solid - first side
                             for k in range(len(location_2)):
+                                print rs.VectorAngle(self.contact_vectors[i][j], joint_plane.XAxis)
                                 #base polyline
                                 point1 = rs.coerce3dpoint(rs.CopyObject(location_2[k], joint_plane.XAxis * finger_width_2/2))
                                 point4 = rs.coerce3dpoint(rs.CopyObject(location_2[k], -joint_plane.XAxis * finger_width_2/2))
@@ -1812,13 +1794,11 @@ if date.today() > date(2020, 1, 1):
                                 finger_box_p = Toolbox.Breps.slice_2_planes(finger_box_p, top_plane, bottom_plane)                  
                                 self.plates[nb].joints_positives.append(finger_box_p)
                                 
-
                                 # contour
                                 top_poly_n = rs.AddPolyline([proj_top_n[0],proj_top_n[1], proj_top_n[2], proj_top_n[3]])
                                 bottom_poly_n = rs.AddPolyline([proj_bottom_n[0],proj_bottom_n[1], proj_bottom_n[2], proj_bottom_n[3]])
                                 top_poly_p = rs.AddPolyline([proj_top_p[0],proj_top_p[1], proj_top_p[2], proj_top_p[3]])
                                 bottom_poly_p = rs.AddPolyline([proj_bottom_p[0],proj_bottom_p[1], proj_bottom_p[2], proj_bottom_p[3]])
-                                
                                 self.plates[nb].top_contour = Toolbox.Curves.insert_curves(self.plates[nb].top_contour, [top_poly_p])
                                 self.plates[nb].bottom_contour = Toolbox.Curves.insert_curves(self.plates[nb].bottom_contour, [bottom_poly_p])
                                 self.plates[i].top_contour = Toolbox.Curves.insert_curves(self.plates[i].top_contour, [top_poly_n])
@@ -1868,6 +1848,36 @@ if date.today() > date(2020, 1, 1):
                                 self.plates[nb].top_contour = Toolbox.Curves.insert_curves(self.plates[nb].top_contour, [top_poly_n])
                                 self.plates[nb].bottom_contour = Toolbox.Curves.insert_curves(self.plates[nb].bottom_contour, [bottom_poly_n])
 
+                            # Structural analysis
+
+                            for k in range(len(location_1)):
+                                pm=rs.CurveClosestPoint(self.FEM_plates[i],location_1[k])
+                                pf=rs.CurveClosestPoint(self.FEM_plates[nb],location_1[k])
+
+                                self.temp.append(rs.EvaluateCurve(self.FEM_plates[i],pm))
+                                self.temp.append(rs.EvaluateCurve(self.FEM_plates[nb],pf))
+                                """
+                                self.FEM_plates[i] = scriptcontext.doc.Objects.Add(self.FEM_plates[i])
+                                self.FEM_plates[nb] = scriptcontext.doc.Objects.Add(self.FEM_plates[nb])
+                                joint_line = rs.AddLine(rs.EvaluateCurve(self.FEM_plates[i],pm), rs.EvaluateCurve(self.FEM_plates[nb],pf))
+                                rs.InsertCurveKnot(self.FEM_plates[i],pm)
+                                rs.InsertCurveKnot(self.FEM_plates[nb],pf)
+                                self.FEM_plates[i] = rs.coercecurve(self.FEM_plates[i])
+                                self.FEM_plates[nb] = rs.coercecurve(self.FEM_plates[nb])
+                                self.FEM_joints.append(rs.coercecurve(joint_line))
+
+                            for k in range(len(location_2)):
+                                pm=rs.CurveClosestPoint(self.FEM_plates[i],location_2[k])
+                                pf=rs.CurveClosestPoint(self.FEM_plates[nb],location_2[k])
+                                self.FEM_plates[i] = scriptcontext.doc.Objects.Add(self.FEM_plates[i])
+                                self.FEM_plates[nb] = scriptcontext.doc.Objects.Add(self.FEM_plates[nb])
+                                joint_line = rs.AddLine(rs.EvaluateCurve(self.FEM_plates[i],pm), rs.EvaluateCurve(self.FEM_plates[nb],pf))
+                                rs.InsertCurveKnot(self.FEM_plates[i],pm)
+                                rs.InsertCurveKnot(self.FEM_plates[nb],pf)
+                                self.FEM_plates[i] = rs.coercecurve(self.FEM_plates[i])
+                                self.FEM_plates[nb] = rs.coercecurve(self.FEM_plates[nb])
+                                self.FEM_joints.append(rs.coercecurve(joint_line))
+                            """
             @__skip_nones
             def add_halflap(self,
                 plates_pairs='all',
@@ -1912,10 +1922,10 @@ if date.today() > date(2020, 1, 1):
                             edges = Toolbox.Breps.brep_edges(volume)
                             edges.sort(key=rs.CurveLength)
                             edges.reverse()
-                            vec_dir = Toolbox.Vectors.round_vector(rs.VectorUnitize(Toolbox.Vectors.cross(self.plates[i].top_normal, self.plates[nb].top_normal)),3)
+                            vec_dir = Toolbox.Vectors.round_vector(rs.VectorUnitize(Toolbox.Vectors.cross(self.plates[i].top_normal, self.plates[nb].top_normal)),6)
                             four_edges = []
                             for edge in edges:
-                                vec_line = Toolbox.Vectors.round_vector(rs.VectorUnitize(Toolbox.Vectors.line_to_vec(edge)),3) 
+                                vec_line = Toolbox.Vectors.round_vector(rs.VectorUnitize(Toolbox.Vectors.line_to_vec(edge)),6) 
                                 if vec_dir == vec_line:
                                     four_edges.append(edge)
                                 elif vec_dir == rs.VectorReverse(vec_line):
@@ -1961,6 +1971,7 @@ if date.today() > date(2020, 1, 1):
                             piece_i_bottom = Toolbox.Curves.curve_difference(rs.IntersectBreps(pieces[0], self.plates[i].bottom_face)[0], self.plates[i].bottom_contour)
                             piece_nb_top = Toolbox.Curves.curve_difference(rs.IntersectBreps(pieces[1], self.plates[nb].top_face)[0], self.plates[nb].top_contour)
                             piece_nb_bottom = Toolbox.Curves.curve_difference(rs.IntersectBreps(pieces[1], self.plates[nb].bottom_face)[0], self.plates[nb].bottom_contour)
+
 
                             # Chamfer
                             if tolerance != 0:
@@ -2039,6 +2050,18 @@ if date.today() > date(2020, 1, 1):
                             self.plates[i].bottom_contour = Toolbox.Curves.insert_curves(self.plates[i].bottom_contour, [piece_i_bottom])
                             self.plates[nb].top_contour = Toolbox.Curves.insert_curves(self.plates[nb].top_contour, [piece_nb_top])
                             self.plates[nb].bottom_contour = Toolbox.Curves.insert_curves(self.plates[nb].bottom_contour, [piece_nb_bottom])
+                            
+                            #Structural analysis
+                            pm=rs.CurveClosestPoint(self.FEM_plates[i],center)
+                            pf=rs.CurveClosestPoint(self.FEM_plates[nb],center)
+                            self.FEM_plates[i] = scriptcontext.doc.Objects.Add(self.FEM_plates[i])
+                            self.FEM_plates[nb] = scriptcontext.doc.Objects.Add(self.FEM_plates[nb])
+                            joint_line = rs.AddLine(rs.EvaluateCurve(self.FEM_plates[i],pm), rs.EvaluateCurve(self.FEM_plates[nb],pf))
+                            rs.InsertCurveKnot(self.FEM_plates[i],pm)
+                            rs.InsertCurveKnot(self.FEM_plates[nb],pf)
+                            self.FEM_plates[i] = rs.coercecurve(self.FEM_plates[i])
+                            self.FEM_plates[nb] = rs.coercecurve(self.FEM_plates[nb])
+                            self.FEM_joints.append(rs.coercecurve(joint_line))
 
                             
             # Operations ----------------------------------
@@ -2062,36 +2085,67 @@ if date.today() > date(2020, 1, 1):
                             if str(i) == plates[j]: flag = True
                             
                     if flag == True:
-
+                        
                         # match seam and direction
-                        new_seam = rg.Curve.ClosestPoint(self.plates[i].bottom_contour , self.plates[i].top_contour.PointAtStart)[1]
-                        self.plates[i].bottom_contour.ChangeClosedCurveSeam(new_seam)
-                        self.plates[i].bottom_contour.RemoveShortSegments(0.001)
+                        self.plates[i].bottom_contour = Toolbox.Curves.resimplify_Curve(self.plates[i].bottom_contour)
                         self.plates[i].bottom_contour  = Toolbox.Curves.align_curve_direction(self.plates[i].top_contour, self.plates[i].bottom_contour)
-                        self.plates[i].bottom_contour  = rs.coercecurve(rs.AddPolyline(rs.PolylineVertices(self.plates[i].bottom_contour)))
-
+                        self.plates[i].top_contour, self.plates[i].bottom_contour = Toolbox.Curves.match_seams(self.plates[i].top_contour,self.plates[i].bottom_contour, True)
+                    
                         # offset contour outside + create notches
                         tmc, bmc = Toolbox.Curves.offset_with_tool(self.plates[i].top_contour, self.plates[i].bottom_contour, contour_tool_radius, notch, limit, tbone)
-
+                        
                         #match seams
-                        tmc, bmc = Toolbox.Curves.match_seams(tmc,bmc, False)
                         self.plates[i].top_milling_contour = rs.coercecurve(tmc)
                         self.plates[i].bottom_milling_contour = rs.coercecurve(bmc)
-
-                        #cylinder planes
-                        tmc_cylinder_points = Toolbox.Curves.get_spikes(tmc)
-                        bmc_cylinder_points = Toolbox.Curves.get_spikes(bmc)
-                        tmc_cylinder_planes = [rs.PlaneFromFrame(point, self.plates[i].top_plane.XAxis, self.plates[i].top_plane.YAxis) for point in tmc_cylinder_points]
-                        bmc_cylinder_planes = [rs.PlaneFromFrame(point, self.plates[i].bottom_plane.XAxis, self.plates[i].bottom_plane.YAxis) for point in bmc_cylinder_points]
-
-                        # create cylinder on contour notches for optional boolean operation
-                        if (tmc_cylinder_planes != []) and (cylinder is True) and (notch is True):
-                            for j in range(len(tmc_cylinder_planes)):
-                                path = rs.AddLine(tmc_cylinder_planes[j].Origin, bmc_cylinder_planes[j].Origin)
-                                cyl = rs.ExtrudeCurve(rs.AddCircle(tmc_cylinder_planes[j], contour_tool_radius), path)
-                                rs.CapPlanarHoles(cyl)
-                                self.plates[i].joints_negatives.append(rs.coercebrep(cyl))
                         
+                        if (cylinder is True) and (notch is True):
+
+                            #cylinder planes and solids
+                            tmc_spikes = Toolbox.Curves.get_spikes(tmc)
+                            bmc_spikes = Toolbox.Curves.get_spikes(bmc)
+
+                            if tmc_spikes != None:
+                                for k in range(len(tmc_spikes)):
+                                    #cylinder points
+                                    tmc_cylinder_point = rs.CurveEndPoint(tmc_spikes[k])
+                                    bmc_cylinder_point = rs.CurveEndPoint(bmc_spikes[k])
+                                    #cylinder planes and scale
+                                    path = rs.AddLine(tmc_cylinder_point,bmc_cylinder_point)
+                                    path_center =Toolbox.Points.average_point([tmc_cylinder_point,bmc_cylinder_point])
+                                    path_length = rs.Distance(tmc_cylinder_point,bmc_cylinder_point)
+                                    axis = Toolbox.Vectors.line_to_vec(path)
+                                    axis_angle = rs.VectorAngle(axis,self.plates[i].top_plane.ZAxis)
+                                    factor = (path_length + 2*contour_tool_radius*abs(math.tan(math.radians(axis_angle))))/path_length
+                                    scaled_path = rs.ScaleObject(path,path_center, [factor,factor,factor],True)
+                                    tmc_cylinder_plane = rs.PlaneFromNormal(rs.CurveStartPoint(scaled_path),axis)
+                                    # create cylinder on holes notches for optional boolean operation
+                                    circle = rs.AddCircle(tmc_cylinder_plane, contour_tool_radius)
+                                    cyl = rs.ExtrudeCurve(circle, scaled_path)
+                                    rs.CapPlanarHoles(cyl)
+                                    self.plates[i].joints_negatives.append(rs.coercebrep(cyl))
+                                    
+                                    #additional notch block
+                                    if rs.CurveLength(tmc_spikes[k]) > contour_tool_radius:
+                                        disk = rs.AddPlanarSrf(rs.AddCircle(tmc_cylinder_plane,10*(rs.CurveLength(tmc_spikes[k])+2*contour_tool_radius)))
+                                        inclination = rs.VectorCreate(rs.CurveEndPoint(path), rs.CurveStartPoint(path))
+                                        proj = rs.ProjectCurveToSurface(tmc_spikes[k],disk,inclination)
+                                        rot = rs.RotateObject(proj, tmc_cylinder_plane.Origin, 90, tmc_cylinder_plane.ZAxis)
+                                        moveV = rs.VectorCreate(tmc_cylinder_plane.Origin, rs.CurveMidPoint(rot))
+                                        mov = rs.MoveObject(rot, moveV)
+                                        sca = rs.ScaleObject(mov, tmc_cylinder_plane.Origin, [10,10,10],True)
+                                        inters = rs.CurveCurveIntersection(circle, sca)
+                                        p1 = inters[0][1]
+                                        p2 = inters[1][1]
+                                        spike_plane = rs.PlaneFromNormal(tmc_cylinder_point, self.plates[i].top_plane.ZAxis)
+                                        disk2 = rs.AddPlanarSrf(rs.AddCircle(spike_plane,10*(rs.CurveLength(tmc_spikes[k])+2*contour_tool_radius)))
+                                        para = rs.ProjectPointToSurface([p1,p2],disk2,inclination)
+                                        para2 = rs.CopyObjects(para, rs.VectorCreate(rs.CurveStartPoint(tmc_spikes[k]), rs.CurveEndPoint(tmc_spikes[k])))
+                                        parallelo = rs.AddPolyline([para[0],para[1],para2[1],para2[0],para[0]])
+                                        path = rs.ScaleObject(path, rs.CurveMidPoint(path), [1.01,1.01,1.01])
+                                        paralleli = rs.ExtrudeCurve(parallelo, path)
+                                        rs.CapPlanarHoles(paralleli)
+                                        self.plates[i].joints_negatives.append(rs.coercebrep(paralleli))
+                                    
                         # offset holes inside + create notches
                         if self.plates[i].top_holes != [] :
                             for j in range(len(self.plates[i].top_holes)):
@@ -2100,25 +2154,57 @@ if date.today() > date(2020, 1, 1):
                                 tmh, bmh = Toolbox.Curves.offset_with_tool(self.plates[i].top_holes[j], self.plates[i].bottom_holes[j], -holes_tool_radius, notch, limit, tbone)
 
                                 #match seams
-                                tmh, bmh = Toolbox.Curves.match_seams(tmh,bmh, False)
                                 self.plates[i].top_milling_holes.append(rs.coercecurve(tmh))
                                 self.plates[i].bottom_milling_holes.append(rs.coercecurve(bmh))
                                 
-                                #cylinder planes
-                                tmh_cylinder_points = Toolbox.Curves.get_spikes(tmh)
-                                bmh_cylinder_points = Toolbox.Curves.get_spikes(bmh)
-                                tmh_cylinder_planes = [rs.PlaneFromFrame(point, self.plates[i].top_plane.XAxis, self.plates[i].top_plane.YAxis) for point in tmh_cylinder_points]
-                                bmh_cylinder_planes = [rs.PlaneFromFrame(point, self.plates[i].bottom_plane.XAxis, self.plates[i].bottom_plane.YAxis) for point in bmh_cylinder_points]
+                                if (cylinder is True) and (notch is True):
 
-                                # create cylinder on holes notches for optional boolean operation
-                                if (tmh_cylinder_planes != []) and (cylinder is True) and (notch is True):
+                                    #cylinder planes and solids
+                                    tmh_spikes = Toolbox.Curves.get_spikes(tmh)
+                                    bmh_spikes = Toolbox.Curves.get_spikes(bmh)
 
-                                    for j in range(len(tmh_cylinder_planes)):
-                                        path = rs.AddLine(tmh_cylinder_planes[j].Origin, bmh_cylinder_planes[j].Origin)
-                                        cyl = rs.ExtrudeCurve(rs.AddCircle(tmh_cylinder_planes[j], holes_tool_radius), path)
-                                        rs.CapPlanarHoles(cyl)
-                                        self.plates[i].joints_negatives.append(rs.coercebrep(cyl))
-
+                                    if tmh_spikes != None:
+                                        for k in range(len(tmh_spikes)):
+                                            #cylinder points
+                                            tmh_cylinder_point = rs.CurveEndPoint(tmh_spikes[k])
+                                            bmh_cylinder_point = rs.CurveEndPoint(bmh_spikes[k])
+                                            #cylinder planes and scale
+                                            path = rs.AddLine(tmh_cylinder_point,bmh_cylinder_point)
+                                            path_center =Toolbox.Points.average_point([tmh_cylinder_point,bmh_cylinder_point])
+                                            path_length = rs.Distance(tmh_cylinder_point,bmh_cylinder_point)
+                                            axis = Toolbox.Vectors.line_to_vec(path)
+                                            axis_angle = rs.VectorAngle(axis,self.plates[i].top_plane.ZAxis)
+                                            factor = 1.001*(path_length + 2*holes_tool_radius*abs(math.tan(math.radians(axis_angle))))/path_length
+                                            scaled_path = rs.ScaleObject(path,path_center, [factor,factor,factor],True)
+                                            tmh_cylinder_plane = rs.PlaneFromNormal(rs.CurveStartPoint(scaled_path),axis)
+                                            # create cylinder on holes notches for optional boolean operation
+                                            circle = rs.AddCircle(tmh_cylinder_plane, holes_tool_radius)
+                                            cyl = rs.ExtrudeCurve(circle, scaled_path)
+                                            rs.CapPlanarHoles(cyl)
+                                            self.plates[i].joints_negatives.append(rs.coercebrep(cyl))
+                                            
+                                            #additional notch block
+                                            if rs.CurveLength(tmh_spikes[k]) > holes_tool_radius:
+                                                disk = rs.AddPlanarSrf(rs.AddCircle(tmh_cylinder_plane,10*(rs.CurveLength(tmh_spikes[k])+2*holes_tool_radius)))
+                                                inclination = rs.VectorCreate(rs.CurveEndPoint(path), rs.CurveStartPoint(path))
+                                                proj = rs.ProjectCurveToSurface(tmh_spikes[k],disk,inclination)
+                                                rot = rs.RotateObject(proj, tmh_cylinder_plane.Origin, 90, tmh_cylinder_plane.ZAxis)
+                                                moveV = rs.VectorCreate(tmh_cylinder_plane.Origin, rs.CurveMidPoint(rot))
+                                                mov = rs.MoveObject(rot, moveV)
+                                                sca = rs.ScaleObject(mov, tmh_cylinder_plane.Origin, [10,10,10],True)
+                                                inters = rs.CurveCurveIntersection(circle, sca)
+                                                p1 = inters[0][1]
+                                                p2 = inters[1][1]
+                                                spike_plane = rs.PlaneFromNormal(tmh_cylinder_point, self.plates[i].top_plane.ZAxis)
+                                                disk2 = rs.AddPlanarSrf(rs.AddCircle(spike_plane,10*(rs.CurveLength(tmh_spikes[k])+2*contour_tool_radius)))
+                                                para = rs.ProjectPointToSurface([p1,p2],disk2,inclination)
+                                                para2 = rs.CopyObjects(para, rs.VectorCreate(rs.CurveStartPoint(tmh_spikes[k]), rs.CurveEndPoint(tmh_spikes[k])))
+                                                parallelo = rs.AddPolyline([para[0],para[1],para2[1],para2[0],para[0]])
+                                                path = rs.ScaleObject(path, rs.CurveMidPoint(path), [1.01,1.01,1.01])
+                                                paralleli = rs.ExtrudeCurve(parallelo, path)
+                                                rs.CapPlanarHoles(paralleli)
+                                                self.plates[i].joints_negatives.append(rs.coercebrep(paralleli))
+                        
             @__skip_nones
             def perform_boolean_operations(self, plates='all', bool_tol=0.1, merge_tol=0.01):
 
@@ -2145,7 +2231,7 @@ if date.today() > date(2020, 1, 1):
                                 brep = rs.coercebrep(rs.CopyObject(self.plates[i].brep))
                                 rhino_joined = rg.Brep.JoinBreps([brep]+self.plates[i].joints_positives, bool_tol)
                                 rhino_unified = rg.Brep.CreateBooleanUnion(rhino_joined, bool_tol)
-
+                            self.plates[i].joints_positives = []
                 # Boolean difference
                 for i in range(self.count):
                     if str(i) in plates or plates == 'all':
@@ -2156,9 +2242,12 @@ if date.today() > date(2020, 1, 1):
                                     self.plates[i].joints_negatives[j] = rs.coercebrep(self.plates[i].joints_negatives[j])
                                     if(self.plates[i].joints_negatives[j].SolidOrientation == rg.BrepSolidOrientation.Inward):
                                         rg.Brep.Flip(self.plates[i].joints_negatives[j])
+                                    if(self.plates[i].brep.SolidOrientation == rg.BrepSolidOrientation.Inward):
+                                        rg.Brep.Flip(self.plates[i].brep)   
                                     try:
                                         self.plates[i].brep = rg.Brep.CreateBooleanDifference(self.plates[i].brep, self.plates[i].joints_negatives[j], bool_tol)[0]
-                                    except: 
+                                    except:
+                                        self.temp.append(self.plates[i].joints_negatives[j])
                                         print('Boolean difference failed on plate '+str(i)+' with joint '+str(j))
                                 #try merge faces
                                 try: 
@@ -2168,6 +2257,8 @@ if date.today() > date(2020, 1, 1):
                                 #back to grasshopper
                                 scriptcontext.doc.Objects.Add(self.plates[i].brep)
                             except: print("boolean difference failed on plate " + str(i))
+
+                            self.plates[i].joints_negatives = []
 
             @__skip_nones
             def transform(self, 
@@ -2207,11 +2298,14 @@ if date.today() > date(2020, 1, 1):
                     self.contact_centers[i],
                     self.contact_planes[i],
                     self.contact_normals[i],
+                    self.FEM_joints[i],
+                    self.FEM_plates[i],
                     self.plates[i].brep,
                     self.plates[i].top_face,
                     self.plates[i].bottom_face,
                     self.plates[i].top_contour,
                     self.plates[i].bottom_contour,
+                    self.plates[i].mid_contour,
                     self.plates[i].top_holes,
                     self.plates[i].bottom_holes,
                     self.plates[i].top_center,
@@ -2234,7 +2328,7 @@ if date.today() > date(2020, 1, 1):
                     if mode == 'Stack':
                         stack_height -= self.plates[i].thickness
                         plate_height = stack_height + (self.plates[i].thickness /2 )
-                        point = rs.CopyObject(center, (0, 0, plate_height))
+                        point = rs.CopyObject(center, origin.ZAxis*plate_height)
                     
                     # array transform
                     if mode == 'Array':
@@ -2290,7 +2384,7 @@ if date.today() > date(2020, 1, 1):
                                             try: 
                                                 rg.Plane.Transform(attributes[j][k], matrix)
                                             except:
-                                                print(attributes[j][k], j, k)
+                                                if attributes[j][k] != "gravity": print(attributes[j][k], j, k)
 
                             #dealing with attributes as simple lists
                             else: 
@@ -2304,7 +2398,47 @@ if date.today() > date(2020, 1, 1):
                                             try: 
                                                 rg.Plane.Transform(attributes[j], matrix)
                                             except:
-                                                print(attributes[j], j)
+                                                if attributes[j] != "gravity":print(attributes[j], j)
+
+                for module in self.modules:
+
+                    #update attributes that are linked to plate and model class
+                    module.update()
+
+                    #update attributes that are independant of the model and plate class
+                    attributes=[module.assembly_vectors]
+
+                    # Transforming each attribute
+                    if mode == 'Custom' or mode == 'Array' or mode == 'Stack' or mode == 'Scale' or mode == 'Orient':
+                        for j in range(len(attributes)):
+                            #dealing with attributes as lists of lists
+                            if isinstance(attributes[j], list) is True:
+                                for k in range(len(attributes[j])):
+                                    try:
+                                        attributes[j][k] = rs.coercegeometry(rs.TransformObject(attributes[j][k], matrix))
+                                    except:
+                                        try:
+                                            rg.Vector3d.Transform(attributes[j][k], matrix)
+                                            rg.Vector3d.Unitize(attributes[j][k])
+                                        except:
+                                            try: 
+                                                rg.Plane.Transform(attributes[j][k], matrix)
+                                            except:
+                                                if attributes[j][k] != "gravity": print(attributes[j][k], j, k)
+
+                            #dealing with attributes as simple lists
+                            else: 
+                                    try:
+                                        attributes[j] = rs.coercegeometry(rs.TransformObject(attributes[j], matrix))
+                                    except:
+                                        try:
+                                            rg.Vector3d.Transform(attributes[j], matrix)
+                                            rg.Vector3d.Unitize(attributes[j])
+                                        except:
+                                            try: 
+                                                rg.Plane.Transform(attributes[j], matrix)
+                                            except:
+                                                if attributes[j] != "gravity":print(attributes[j], j)
 
             @__skip_nones
             def switch_top_bottom(self, plates=[]):
@@ -2328,7 +2462,7 @@ if date.today() > date(2020, 1, 1):
 
         #Modules -----------------------------------------------------------------------
 
-        class PlateModules(PlateModel):
+        class PlateModule(PlateModel):
 
             def __init__(self, model, index, step, sub_sequence, parent, children):
                 
@@ -2352,7 +2486,7 @@ if date.today() > date(2020, 1, 1):
                 self.needed_supports = 1
 
                 # TOPOLOGY -------------------------------------------
-                """
+                
                 self.contact_ids = [self.model.contact_ids[integer] for integer in self.plate_ids]
                 self.contact_pairs = [self.model.contact_pairs[integer] for integer in self.plate_ids]
                 self.contact_breps = [self.model.contact_breps[integer] for integer in self.plate_ids]
@@ -2362,50 +2496,16 @@ if date.today() > date(2020, 1, 1):
                 self.contact_centers = [self.model.contact_centers[integer] for integer in self.plate_ids]
                 self.contact_normals = [self.model.contact_normals[integer] for integer in self.plate_ids]
                 self.contact_planes = [self.model.contact_planes[integer] for integer in self.plate_ids]
-                self.contact_vectors = [self.model.contact_vectors[integer] for integer in self.plate_ids]
-                
-                self.contact_ids_in = self.__get_contact_inside_module(self.contact_ids)
-                self.contact_pairs_in = self.__get_contact_inside_module(self.contact_pairs)
-                self.contact_breps_in = self.__get_contact_inside_module(self.contact_breps)
-                self.contact_zones_in= self.__get_contact_inside_module(self.contact_zones)
-                self.contact_types_in = self.__get_contact_inside_module(self.contact_types)
-                self.contact_strings_in = self.__get_contact_inside_module(self.contact_strings)
-                self.contact_centers_in = self.__get_contact_inside_module(self.contact_centers)
-                self.contact_normals_in = self.__get_contact_inside_module(self.contact_normals)
-                self.contact_planes_in = self.__get_contact_inside_module(self.contact_planes)
-                self.contact_vectors_in = self.__get_contact_inside_module(self.contact_vectors)
 
-                self.contact_ids_out = self.__get_contact_outside_module(self.contact_ids)
-                self.contact_pairs_out = self.__get_contact_outside_module(self.contact_pairs)
-                self.contact_breps_out = self.__get_contact_outside_module(self.contact_breps)
-                self.contact_zones_out= self.__get_contact_outside_module(self.contact_zones)
-                self.contact_types_out = self.__get_contact_outside_module(self.contact_types)
-                self.contact_strings_out = self.__get_contact_outside_module(self.contact_strings)
-                self.contact_centers_out = self.__get_contact_outside_module(self.contact_centers)
-                self.contact_normals_out = self.__get_contact_outside_module(self.contact_normals)
-                self.contact_planes_out = self.__get_contact_outside_module(self.contact_planes)
-                self.contact_vectors_out = self.__get_contact_outside_module(self.contact_vectors)
-                
-            def __get_contact_inside_module(self, mylist):
-                inlist = []
-                for i in range(len(self.contact_ids)):
-                    sub_list = []
-                    for j in range(len(self.contact_ids[i])):
-                        if self.contact_ids[i][j] in self.plate_ids: 
-                            sub_list.append(mylist[i][j])
-                    inlist.append(sub_list)
-                return inlist
+            def update(self):
+                self.plates = [self.model.plates[integer] for integer in self.plate_ids]
+                self.breps = [plate.brep for plate in self.plates]
+                self.contact_breps = [self.model.contact_breps[integer] for integer in self.plate_ids]
+                self.contact_zones= [self.model.contact_zones[integer] for integer in self.plate_ids]
+                self.contact_centers = [self.model.contact_centers[integer] for integer in self.plate_ids]
+                self.contact_normals = [self.model.contact_normals[integer] for integer in self.plate_ids]
+                self.contact_planes = [self.model.contact_planes[integer] for integer in self.plate_ids]
 
-            def __get_contact_outside_module(self, mylist):
-                outlist = []
-                for i in range(len(self.contact_ids)):
-                    sub_list = []
-                    for j in range(len(self.contact_ids[i])):
-                        if self.contact_ids[i][j] in self.plate_ids: pass
-                        else: sub_list.append(mylist[i][j])
-                    outlist.append(sub_list)
-                return outlist
-                """
             pass
 
         #Plates -----------------------------------------------------------------------
@@ -2423,6 +2523,7 @@ if date.today() > date(2020, 1, 1):
                 self.bottom_face = self.__get_bottom_face()
                 self.top_contour = self.__get_top_contour()
                 self.bottom_contour = self.__get_bottom_contour()
+                self.mid_contour = self.__get_mid_contour()
                 self.top_holes = self.__get_top_holes()
                 self.bottom_holes = self.__get_bottom_holes()
                 self.top_center = self.__get_top_center()
@@ -2443,8 +2544,8 @@ if date.today() > date(2020, 1, 1):
 
                 # FABRICATION ----------------------------------------
 
-                self.top_milling_contour = []
-                self.bottom_milling_contour = []
+                self.top_milling_contour = None
+                self.bottom_milling_contour = None
                 self.top_milling_holes = []
                 self.bottom_milling_holes = []
 
@@ -2468,26 +2569,25 @@ if date.today() > date(2020, 1, 1):
             def __get_top_contour(self):
                 largest_contour = Toolbox.Surfaces.get_face_largest_contour(self.top_face)
                 if type(largest_contour) != rg.PolylineCurve: largest_contour=largest_contour.ToPolyline(0.01,0.01,0.01,10000)
-                largest_contour = scriptcontext.doc.Objects.Add(largest_contour)
-                Toolbox.Curves.resimplify_Curve(largest_contour)
-                largest_contour = rs.coercecurve(largest_contour)
+                largest_contour = Toolbox.Curves.resimplify_Curve(largest_contour)
                 return largest_contour
 
             def __get_bottom_contour(self):
                 perimeter = Toolbox.Surfaces.get_face_largest_contour(self.bottom_face)
-                #adjust seam
-                new_seam = rg.Curve.ClosestPoint(perimeter, self.top_contour.PointAtStart)[1]
-                perimeter.ChangeClosedCurveSeam(new_seam)
-                #adjust direction
-                new_perimeter = Toolbox.Curves.align_curve_direction(self.top_contour,perimeter)
-                if type(new_perimeter) != rg.PolylineCurve: new_perimeter=new_perimeter.ToPolyline(0.01,0.01,0.01,10000)
-                new_perimeter = scriptcontext.doc.Objects.Add(new_perimeter)
-                Toolbox.Curves.resimplify_Curve(new_perimeter)
-                new_perimeter = rs.coercecurve(new_perimeter)
-                #adjust seam again
-                new_seam = rg.Curve.ClosestPoint(new_perimeter, self.top_contour.PointAtStart)[1]
-                new_perimeter.ChangeClosedCurveSeam(new_seam)
-                return new_perimeter
+                perimeter = Toolbox.Curves.align_curve_direction(self.top_contour,perimeter)
+                perimeter = Toolbox.Curves.match_seams(self.top_contour,perimeter)[1]
+                if type(perimeter) != rg.PolylineCurve: perimeter=perimeter.ToPolyline(0.01,0.01,0.01,10000)
+                return perimeter
+
+            def __get_mid_contour(self):
+                top_vertices = rs.PolylineVertices(self.top_contour)
+                print len(top_vertices)
+                bottom_vertices = rs.PolylineVertices(self.bottom_contour)
+                print len(bottom_vertices)
+                mid_vertices = []
+                for i in range(len(top_vertices)):
+                    mid_vertices.append((top_vertices[i]+bottom_vertices[i])/2)
+                return rs.coercecurve(rs.AddPolyline(mid_vertices))
 
             def __get_top_holes(self):
                 return Toolbox.Surfaces.get_face_other_contours(self.top_face)
@@ -2539,7 +2639,7 @@ if date.today() > date(2020, 1, 1):
 
             def __get_thickness(self):
                 pointA = self.top_center
-                pointB = rg.Brep.ClosestPoint(self.bottom_face, pointA)
+                pointB = rg.Plane.ClosestPoint(self.bottom_plane, pointA)
                 t = rg.Point3d.DistanceTo(pointA,pointB)
                 return t
 
@@ -2610,7 +2710,7 @@ if date.today() > date(2020, 1, 1):
                 def brep_from_2_poly(poly1, poly2):
                     poly2 = Toolbox.Curves.align_curve_direction(rs.coercegeometry(poly1), rs.coercegeometry(poly2))
                     poly2 = rs.AddPolyline(rs.PolylineVertices(poly2)+[rs.PolylineVertices(poly2)[0]])
-                    poly1, poly2 = Toolbox.Curves.match_seams(poly1,poly2)
+                    poly1, poly2 = Toolbox.Curves.match_seams(rs.coercecurve(poly1),rs.coercecurve(poly2))
                     points_a = rs.PolylineVertices(poly1)
                     points_b = rs.PolylineVertices(poly2)
                     faces = []
@@ -2731,117 +2831,101 @@ if date.today() > date(2020, 1, 1):
                     """""Offset a pair of curves according to a tool radius for 5axis CNC cutting"""
 
                     if tool_radius == 0 : return (crv_top,crv_bot)
-
                     #convert to gh object to simplify the curve and reconvert to gh object
-                    crv_top = scriptcontext.doc.Objects.Add(crv_top)
-                    crv_bot = scriptcontext.doc.Objects.Add(crv_bot)
                     crv_top = Toolbox.Curves.resimplify_Curve(crv_top)
                     crv_bot = Toolbox.Curves.resimplify_Curve(crv_bot)
                     crv_top = scriptcontext.doc.Objects.Add(crv_top)
                     crv_bot = scriptcontext.doc.Objects.Add(crv_bot)
 
-                    #explode curves and get surface normal
+                    #get surface normal
+                    normal = rs.SurfaceNormal(rs.AddPlanarSrf(crv_top),(0,0))
+                    normal2 = rs.SurfaceNormal(rs.AddPlanarSrf(crv_bot),(0,0))
+                    top_plane = rs.PlaneFromNormal(rs.CurveStartPoint(crv_top), normal)
+                    bot_plane = rs.PlaneFromNormal(rs.CurveStartPoint(crv_bot), normal)
+
+                    #check offset direction
+                    testpoint = rs.CopyObject(top_plane.Origin, 0.0001*normal)
+                    if (rs.Distance(bot_plane.Origin, testpoint) > rs.Distance(bot_plane.Origin, top_plane.Origin)):
+                        rs.ReverseCurve(crv_top)
+                        rs.ReverseCurve(crv_bot)
+
+                    #explode curves
                     seg_top = rs.ExplodeCurves(crv_top)
                     seg_bot = rs.ExplodeCurves(crv_bot)
-                    normal = rs.SurfaceNormal(rs.AddPlanarSrf(crv_top),(0,0))
-                    moved_planes = []
-                    seg_planes = []
-                    offset_values = []
-                    corner_inclinations = []
-
+                    if rs.AddPlanarSrf(crv_top) is None: raise Exception('A curve is not planar')
                     if len(seg_top) != len(seg_bot): raise Exception('Offset_with_tool requires top and bottom curves with the same amount of vertices')
-                    
-                    # Create variable offset in function of the inclination of the tool
-                    for i in range(len(seg_top)):
-                        vec_join = rs.VectorCreate(rs.CurveStartPoint(seg_bot[i]), rs.CurveStartPoint(seg_top[i]))
-                        vec_bot = rs.VectorCreate(rs.CurveStartPoint(seg_bot[i]), rs.CurveEndPoint(seg_bot[i]))
-                        vec_norm = rs.VectorCrossProduct(vec_join, vec_bot)
-                        vec_angle = rs.VectorAngle(vec_norm, (0,0,1)) - 90
-                        offset = tool_radius/math.cos(math.radians(vec_angle))
-                        offset_values.append(offset)
-                        seg_plane = rs.PlaneFromFrame(rs.CurveStartPoint(seg_bot[i]), vec_bot, vec_join)
-                        seg_planes.append(seg_plane)
-                        offset_vec = offset * rs.VectorUnitize(rs.VectorCrossProduct(normal,vec_bot))
-                        moved_planes.append(rs.MovePlane(seg_plane, rs.CopyObject(rs.CurveStartPoint(seg_bot[i]),offset_vec)))
+
                     top_poly = []
                     bot_poly = []
-                    for i in range(len(moved_planes)):
-                        line = rs.PlanePlaneIntersection(moved_planes[i-1],moved_planes[i])
-                        corner_inclinations.append(rs.VectorCreate(line[1], line[0]))
-                        top_poly.append(rs.LinePlaneIntersection(line, rs.PlaneFromNormal(rs.CurveStartPoint(crv_top), normal)))
-                        bot_poly.append(rs.LinePlaneIntersection(line, rs.PlaneFromNormal(rs.CurveStartPoint(crv_bot), normal)))
+                    # Create variable offset in function of the inclination of the tool
+                    for i in range(len(seg_top)):
+                        f1_plane = rs.PlaneFromPoints(rs.CurveStartPoint(seg_top[i-1]), rs.CurveEndPoint(seg_top[i-1]), rs.CurveStartPoint(seg_bot[i-1]))
+                        f2_plane = rs.PlaneFromPoints(rs.CurveStartPoint(seg_top[i]), rs.CurveEndPoint(seg_top[i]), rs.CurveStartPoint(seg_bot[i]))
+                        f1_plane = rs.MovePlane(f1_plane, rs.CopyObject(f1_plane.Origin, tool_radius * f1_plane.ZAxis))
+                        f2_plane = rs.MovePlane(f2_plane, rs.CopyObject(f2_plane.Origin, tool_radius * f2_plane.ZAxis))
+                        top_poly.append(Toolbox.Planes.three_planes_intersection(f1_plane, f2_plane, top_plane))
+                        bot_poly.append(Toolbox.Planes.three_planes_intersection(f1_plane, f2_plane, bot_plane))
                     top_poly = rs.AddPolyline(top_poly+[top_poly[0]])
                     bot_poly = rs.AddPolyline(bot_poly+[bot_poly[0]])
 
+                    # notch creation
                     if notch is True:
-                        top_poly = Toolbox.Curves.add_corner_notches(top_poly, tool_radius, offset_values, corner_inclinations, limit, tbone)
-                        bot_poly = Toolbox.Curves.add_corner_notches(bot_poly, tool_radius, offset_values, corner_inclinations, limit, tbone)
-
+                        if tool_radius < 0: con = 1 #convex corner for inside milling
+                        else: con = -1 #concave corners for outside
+                        corner = Toolbox.Curves.corner_analysis(top_poly, con)
+                        angles = corner[2]
+                        ids = corner[3]
+                        tv = rs.PolylineVertices(crv_top)   #top vertices
+                        tov = rs.PolylineVertices(top_poly) #top offset vertices
+                        bv = rs.PolylineVertices(crv_bot)   #bottom vertices
+                        bov = rs.PolylineVertices(bot_poly) #bottom offset vertices
+                        ntov = [] #new top offset vertices
+                        nbov = [] #new bottom offset vertices
+                        for i in range(len(tov)):
+                            ntov.append(tov[i])
+                            nbov.append(bov[i])
+                            for j in range(len(ids)):
+                                if i == ids[j]+1:
+                                    if angles[j]>limit and angles[j]<(180-limit):
+                                        #dogbone notch
+                                        if tbone is False:
+                                            ntov.append(Toolbox.Curves.create_dogbone_notch(tov[i], tv[i], tool_radius, rs.VectorCreate(tv[i], bv[i])))
+                                            nbov.append(Toolbox.Curves.create_dogbone_notch(bov[i], bv[i], tool_radius, rs.VectorCreate(tv[i], bv[i])))
+                                        else:
+                                            if rs.Distance(tv[i],tv[i-1]) < rs.Distance(tv[i],tv[(i+1)%(len(tv)-1)]):
+                                                axis = rs.VectorCreate(tv[i],tv[i-1])
+                                            else:  axis = rs.VectorCreate(tv[i],tv[(i+1)%(len(tv)-1)])
+                                            ntov.append(Toolbox.Curves.create_tbone_notch(tov[i], tv[i], axis, rs.VectorCreate(tv[i], bv[i])))
+                                            nbov.append(Toolbox.Curves.create_tbone_notch(bov[i], bv[i], axis, rs.VectorCreate(tv[i], bv[i])))
+                                        ntov.append(tov[i])
+                                        nbov.append(bov[i])
+                        top_poly = rs.AddPolyline(ntov)
+                        bot_poly = rs.AddPolyline(nbov) 
                     return (top_poly, bot_poly)
 
                 @staticmethod
-                def add_corner_notches(crv, tool_radius, offset_values, corner_inclinations, limit=1, tbone=False):
-                 
-                    if tool_radius < 0: con = 1 #convex corner for inside milling
-                    else: con = -1 #concave corners for outside
-                    corner = Toolbox.Curves.corner_analysis(crv, con)
-                    points = corner[0]
-                    bisectors = corner[1]
-                    angles = corner[2]
-                    ids = corner[3]
-                    pos_modifier = [] #coef to extend or reduce the bissector notch to transform it into a t-bone notch
-                    ori_modifier = [] #coef to extend or reduce the t-bone notch to take into account the tool inclination
+                def create_dogbone_notch(a, b, r, v):
+                    """create a noch at a given polyline vertice (a=offset_point, b=polyline_point, r=tool_radius v=tool_inclination)""" 
+                    r = abs(r)
+                    c = rs.AddLine(b,rs.CopyObject(b,v))
+                    d = rs.LineClosestPoint(c,a)
+                    e= rs.CopyObject(a, r*rs.VectorUnitize(rs.VectorCreate(d,a)))
+                    pl=rs.PlaneFromNormal(e,rs.VectorCreate(e,a))
+                    f = rs.LinePlaneIntersection([a,b],pl)
+                    dist = rs.Distance(f,b)
+                    dir = rs.VectorUnitize(rs.VectorCreate(b,a))
+                    g = rs.CopyObject(a,dist*dir)
+                    return rs.PointCoordinates(g)
 
-                    # insert notch in offset
-                    pieces = rs.ExplodeCurves(crv)
-                    vertices = rs.PolylineVertices(crv)
-                    new_vertices = [rs.CurveStartPoint(crv)]
-                    del vertices[0]
+                @staticmethod
+                def create_tbone_notch(a, b, axis, v):
+                    """create a noch at a given polyline vertice (a=offset_point, b=polyline_point, axis=tbone direction, v=tool_inclination)""" 
+                    pl = rs.PlaneFromFrame(b, v, axis)
+                    pl = rs.RotatePlane(pl, 90, pl.XAxis)
+                    c = rs.CopyObject(a, axis)
+                    d = rs.LinePlaneIntersection([a,c],pl)
+                    return d
 
-                    for i in range(len(vertices)):
-                        for j in range(len(ids)):
-                            if i == ids[j]:
-                                factor = ((tool_radius / math.sin(math.radians(angles[j]/2))) - tool_radius) * -con 
-                                #t-bone notch for 5 axis cutting
-                                if tbone is True and rs.Distance(vertices[i], vertices[(i+1)%len(vertices)]) != rs.Distance(vertices[i], vertices[(i-1)%len(vertices)]):
-                                    if rs.Distance(vertices[i], vertices[(i+1)%len(vertices)]) > rs.Distance(vertices[i], vertices[(i-1)%len(vertices)]):
-                                        dir_1 = rs.VectorCreate(vertices[(i-1)%len(vertices)], vertices[i])
-                                        pos_modifier.append(-abs(tool_radius) / (math.tan(math.radians(angles[j]/2)) * factor))
-                                        ori_modifier.append(offset_values[(i+1)%len(vertices)]/tool_radius)
-                                        bisectors[j] =  rs.VectorUnitize(dir_1)
-                                    else:
-                                        dir_2 = rs.VectorCreate(vertices[(i+1)%len(vertices)], vertices[i])
-                                        pos_modifier.append(-abs(tool_radius) / (math.tan(math.radians(angles[j]/2)) * factor))
-                                        ori_modifier.append(offset_values[i]/tool_radius)
-                                        bisectors[j] = rs.VectorUnitize(dir_2)
-
-                                # dog-bone notch for 5 axis cutting
-                                else:
-                                    pos_modifier.append(1)
-                                    dir_1 = offset_values[(i+1)%len(vertices)] * rs.VectorUnitize(rs.VectorCreate(vertices[(i-1)%len(vertices)], vertices[i]))
-                                    dir_2 = offset_values[i] * rs.VectorUnitize(rs.VectorCreate(vertices[(i+1)%len(vertices)], vertices[i]))
-                                    bisectors[j] = rs.VectorUnitize(dir_1 + dir_2)
-                                    if tool_radius > 0: bisectors[j] = rs.VectorReverse(bisectors[j])
-                                    alpha = rs.VectorAngle(bisectors[j], corner_inclinations[(i+1)%len(vertices)])
-                                    dog_len = math.sqrt(offset_values[i]**2 +offset_values[(i+1)%len(vertices)]**2) - (abs(tool_radius)/math.sin(math.radians(alpha)))
-                                    ori_modifier.append(dog_len/factor)
-                    
-                    # insert notch in offset
-                    for i in range(len(pieces)):
-                        
-                        for j in range(len(ids)):
-                            if i == ids[j]:
-                                # limit angles where notch should be placed
-                                if angles[j]>limit and angles[j]<(180-limit):
-                                    factor = ((tool_radius / math.sin(math.radians(angles[j]/2))) - tool_radius) * -con * pos_modifier[j] * ori_modifier[j]
-                                    notch_point = rs.coerce3dpoint(rs.CopyObject((points[j]), rs.VectorScale(bisectors[j], factor)))
-                                    new_vertices.append(rs.CurveEndPoint(pieces[i]))
-                                    new_vertices.append(notch_point)
-                        new_vertices.append(rs.CurveEndPoint(pieces[i]))
-                    poly = rs.AddPolyline(new_vertices)
-                    
-                    return poly
-                    
                 @staticmethod
                 def curve_concave_points(curve):
 
@@ -2970,6 +3054,7 @@ if date.today() > date(2020, 1, 1):
                         final_curve = scriptcontext.doc.Objects.Add(final_curve)
                         if seam != None:
                             Toolbox.Curves.curve_seam(final_curve, seam)
+                            final_curve = rs.coercecurve(final_curve)
                             final_curve = Toolbox.Curves.resimplify_Curve(final_curve)
                         else: final_curve = rs.coercecurve(final_curve)
                         return final_curve
@@ -2986,10 +3071,13 @@ if date.today() > date(2020, 1, 1):
                     line = rg.Intersect.Intersection.CurveBrep(trim_curve, base_surface, 0.001)[1][0]
                     p1 = line.PointAtStart
                     p2 = line.PointAtEnd
-                    param1 = round(rg.Curve.ClosestPoint(base_curve,p1)[1],3)
-                    param2 = round(rg.Curve.ClosestPoint(base_curve,p2)[1],3)
+                    param1 = round(rg.Curve.ClosestPoint(base_curve,p1)[1],6)
+                    param2 = round(rg.Curve.ClosestPoint(base_curve,p2)[1],6)
+                    if param2 < param1 : param1, param2 = param2, param1
                     trim1 = rg.Curve.Trim(copy.deepcopy(base_curve), param1, param2)
-                    trim2 = rg.Curve.Trim(copy.deepcopy(base_curve), param2, param1)               
+                    trim2A = rg.Curve.Trim(copy.deepcopy(base_curve), base_curve.Domain[0], param1)
+                    trim2B = rg.Curve.Trim(copy.deepcopy(base_curve), param2, base_curve.Domain[1])
+                    trim2 = rg.Curve.JoinCurves([trim2A,trim2B])[0]   
                     mid = rs.coerce3dpoint(Toolbox.Points.average_point([p1,p2]))
                     d1 = rg.Curve.PointAt(trim1,rg.Curve.ClosestPoint(trim1,mid)[1]) 
                     d2 = rg.Curve.PointAt(trim2,rg.Curve.ClosestPoint(trim2,mid)[1]) 
@@ -3086,24 +3174,62 @@ if date.today() > date(2020, 1, 1):
                 def resimplify_Curve(curve):
                     """Simplify and change curve seam if it's not already a vertice"""
 
-                    rs.SimplifyCurve(curve)
-                    nextstart = rs.PolylineVertices(curve)[0]
-                    rs.CurveSeam(curve,rs.CurveClosestPoint(curve, nextstart))
-                    rs.SimplifyCurve(curve)
-                    nextstart = rs.PolylineVertices(curve)[1]
-                    rs.CurveSeam(curve,rs.CurveClosestPoint(curve, nextstart))
-                    rs.SimplifyCurve(curve)
-                    nextstart = rs.PolylineVertices(curve)[-1]
-                    rs.CurveSeam(curve,rs.CurveClosestPoint(curve, nextstart))
+                    curve=scriptcontext.doc.Objects.Add(curve)
                     vertices = rs.PolylineVertices(curve)
-                    vertices = rs.CullDuplicatePoints(vertices, 0.0001)
-                    curve = rs.AddPolyline(vertices)
-                    curve = Toolbox.Curves.close_open_curve(curve)
+                    best_candidate=curve
+                    best_v_len = len(vertices)
 
-                    return curve
+                    for i in range(len(vertices)):
+                        new_candidate = rs.CopyObject(curve)
+                        rs.CurveSeam(new_candidate, rs.CurveClosestPoint(new_candidate,vertices[i]))
+                        rs.SimplifyCurve(new_candidate)
+                        v_len = len(rs.PolylineVertices(new_candidate))
+                        if v_len < best_v_len:
+                            best_candidate = rs.CopyObject(new_candidate)
+                            best_v_len = v_len
+                    return rs.coercecurve(best_candidate)
 
                 @staticmethod
-                def match_seams(curve1,curve2, simplify=True):
+                def match_seams(curve1, curve2, simplify=True):
+                    """match the seam of two curves that have parallel segments"""
+
+                    if simplify is True:
+                        curve1=Toolbox.Curves.resimplify_Curve(curve1)
+                        curve2=Toolbox.Curves.resimplify_Curve(curve2)
+                    curve2 = Toolbox.Curves.align_curve_direction(rs.coercecurve(curve1),rs.coercecurve(curve2))
+                    curve1=scriptcontext.doc.Objects.Add(curve1)
+                    curve2=scriptcontext.doc.Objects.Add(curve2)
+                    seg1 = rs.ExplodeCurves(curve1)
+                    seg2 = rs.ExplodeCurves(curve2)
+                    seg1 = [seg for seg in seg1 if rs.CurveLength(seg)>0.00001]
+                    seg2 = [seg for seg in seg2 if rs.CurveLength(seg)>0.00001]
+                    curve1 = rs.AddPolyline([rs.CurveStartPoint(seg) for seg in seg1]+[rs.CurveStartPoint(curve1)])
+                    curve2 = rs.AddPolyline([rs.CurveStartPoint(seg) for seg in seg2]+[rs.CurveStartPoint(curve2)])
+                    shift = None
+
+                    if len(seg1) == len(seg2):
+                        for i in range(len(seg2)):
+                            flag = True
+                            for j in range(len(seg1)):
+                                vec1 = Toolbox.Vectors.line_to_vec(seg2[(i+j)%len(seg2)])
+                                vec2 = Toolbox.Vectors.line_to_vec(seg1[j])
+                                if rs.IsVectorParallelTo(vec1,vec2) != 1:
+                                    flag = False
+                            if flag == True:
+                                shift = i
+                                break
+                    else: raise Exception("polylines have a different number of segments")
+                    if shift == None: raise Exception("polyline segments are not parallel")
+                    else:
+                        points = rs.PolylineVertices(curve2)
+                        Toolbox.Curves.curve_seam(curve2, points[shift])
+                        rs.coercecurve(curve2)
+                    curve1 = rs.coercecurve(curve1)
+                    curve2 = rs.coercecurve(curve2)
+                    return [curve1,curve2]
+
+                @staticmethod
+                def match_seams_old(curve1,curve2, simplify=True):
                     """Match the seams of two curves"""
                     if simplify is True:
                         Toolbox.Curves.resimplify_Curve(curve1)
@@ -3137,7 +3263,7 @@ if date.today() > date(2020, 1, 1):
                     del vertices[0]
                     for i in range(len(vertices)):
                         if rs.Distance(vertices[i-1],vertices[(i+1)%len(vertices)]) < tolerance:
-                            spikes.append(vertices[i])
+                            spikes.append(rs.AddLine(vertices[i-1],vertices[i]))
                     return spikes
 
                 @staticmethod
@@ -3255,8 +3381,8 @@ if date.today() > date(2020, 1, 1):
                     negative = []
                     positive_points = []
                     negative_points = []
-                    temp = []
-                    temp.append(rs.CurveStartPoint(poly))
+                    tempo = []
+                    tempo.append(rs.CurveStartPoint(poly))
                     flag = 'Null'
 
 
@@ -3271,11 +3397,11 @@ if date.today() > date(2020, 1, 1):
 
                         # When the point is on the axis, close the polyline and initialize a new one
                         if cross == None:
-                            temp.append(points[i+1])
-                            temp.append(temp[0])
-                            if flag == 'Pos': positive_points.append(temp)
-                            if flag == 'Neg': negative_points.append(temp)
-                            temp = []
+                            tempo.append(points[i+1])
+                            tempo.append(tempo[0])
+                            if flag == 'Pos': positive_points.append(tempo)
+                            if flag == 'Neg': negative_points.append(tempo)
+                            tempo = []
                             flag = 'Null'
                         
                         # Change the flag value depending of the crossproduct result
@@ -3286,7 +3412,7 @@ if date.today() > date(2020, 1, 1):
                         else: raise Exception('Cross Product in Polyline half-zone got an unexpected result')
 
                         # Add this point to the temporary list
-                        temp.append(points[i+1])
+                        tempo.append(points[i+1])
 
                     # Create polylines
                     if positive_points != []: 
@@ -3341,24 +3467,19 @@ if date.today() > date(2020, 1, 1):
                     for segX in segmentsX:
                         for segY in segmentsY:
                             #line are parallel
-                            if rs.IsVectorParallelTo(Toolbox.Vectors.line_to_vec(segX),Toolbox.Vectors.line_to_vec(segY)) != 0:
-                                if rs.Distance(rs.LineClosestPoint(segX, rs.CurveStartPoint(segY)),rs.CurveStartPoint(segY)) < 0.001:
-                                        if rs.Distance(rs.LineClosestPoint(segX, rs.CurveStartPoint(segY)),rs.CurveStartPoint(segX)) <= rs.CurveLength(segX):
-                                            if rs.Distance(rs.LineClosestPoint(segX, rs.CurveStartPoint(segY)),rs.CurveEndPoint(segX)) <= rs.CurveLength(segX):
-                                                flag = True
+                            isParallel = rs.IsVectorParallelTo(Toolbox.Vectors.line_to_vec(segX),Toolbox.Vectors.line_to_vec(segY))!= 0
+                            isColinear = rs.Distance(rs.LineClosestPoint(segX, rs.CurveStartPoint(segY)),rs.CurveStartPoint(segY)) < 0.001
+                            if isParallel and isColinear:
+                                if isParallel == -1: segY=rs.ReverseCurve(segY)
+                                d1 = rs.Distance(rs.CurveStartPoint(segX), rs.CurveStartPoint(segY))
+                                d2 = rs.Distance(rs.CurveEndPoint(segX), rs.CurveEndPoint(segY))
+                                d3 = rs.Distance(rs.CurveStartPoint(segX), rs.CurveEndPoint(segY))
+                                d4 = rs.Distance(rs.CurveEndPoint(segX), rs.CurveStartPoint(segY))
+                                l1 = rs.CurveLength(segY) 
+                                l2 = rs.CurveLength(segX) 
+                                if ((d1 <= l1) and (d3 <= l1)) or ((d2 <= l1) and (d4 <= l1)): flag = True
+                                if ((d1 <= l2) and (d4<= l2)) or ((d2 <= l2) and (d3 <= l2)): flag = True
                     return flag
-
-                    """
-                    curve1 = rs.coercecurve(curve1)
-                    curve2 = rs.coercecurve(curve2)
-                    srf1 = rg.Brep.CreatePlanarBreps(curve1)[0]
-                    intbool, line1, points = rg.Intersect.Intersection.CurveBrep(curve2,srf1,10)
-                    srf2 = rg.Brep.CreatePlanarBreps(curve2)[0]
-                    intbool, line2, points = rg.Intersect.Intersection.CurveBrep(curve1,srf2,10)
-                    if len(line1) == 1 and len(line2) == 1:
-                        return line2
-                    else: return None
-                    """
 
                 @staticmethod
                 def bezier(points, t):
@@ -3373,6 +3494,7 @@ if date.today() > date(2020, 1, 1):
                             new_points.append(rs.EvaluateCurve(l,t*d))
                         points = new_points
                     return points[0]
+
 
             class Planes:
 
@@ -3434,8 +3556,8 @@ if date.today() > date(2020, 1, 1):
                     for i in range(len(vectors)):
                         add = True
                         for j in range(i):
-                            v1 = Toolbox.Vectors.round_vector(vectors[i], n=3)
-                            v2 = Toolbox.Vectors.round_vector(vectors[j], n=3)
+                            v1 = Toolbox.Vectors.round_vector(vectors[i], n=6)
+                            v2 = Toolbox.Vectors.round_vector(vectors[j], n=6)
                             if v1 == v2: add=False
                         if add == True: unique_vec.append(vectors[i])
                     return unique_vec
@@ -3447,8 +3569,8 @@ if date.today() > date(2020, 1, 1):
                     line = rs.AddLine(center,rs.CopyObject(center,vector))
                     disk = rs.AddPlanarSrf(rs.AddCircle(plane,2*rs.VectorLength(vector)))
                     direction = -rs.SurfaceNormal(disk,[0,0])
-                    rounded_vec = Toolbox.Vectors.round_vector(vector)
-                    rounded_dir = Toolbox.Vectors.round_vector(direction)
+                    rounded_vec = Toolbox.Vectors.round_vector(vector,6)
+                    rounded_dir = Toolbox.Vectors.round_vector(direction,6)
                     if rounded_vec != rounded_dir and rounded_vec != -rounded_dir:
                         projection = rs.ProjectCurveToSurface(line,disk,direction)
                         new_vector=rs.VectorUnitize(rs.VectorCreate(rs.CurveEndPoint(projection),rs.CurveStartPoint(projection)))
@@ -3474,7 +3596,7 @@ if date.today() > date(2020, 1, 1):
                     else: raise Exception("is_vector_outward cannot compute because vector is tangent to circle")
 
                 @staticmethod
-                def round_vector(vector, n=3):
+                def round_vector(vector, n=6):
                     """round x,y,z components of a vector to n decimals"""
                     vec = copy.deepcopy(vector)
                     for i in range(len(vec)):
@@ -3500,6 +3622,16 @@ if date.today() > date(2020, 1, 1):
 
 
             class Points:
+
+                @staticmethod
+                def point_closest_point(point, points):
+                    shortest_distance = None
+                    candidate = None
+                    for p in points:
+                        if shortest_distance is None or rs.Distance(point, p) < shortest_distance:
+                            shortest_distance = rs.Distance(point, p)
+                            candidate = p
+                    return candidate
 
                 @staticmethod
                 def average_point(points):
@@ -8657,11 +8789,11 @@ if date.today() > date(2020, 1, 1):
                     rl = raggedList
                     result = DataTree[object]()
                     for i in range(len(rl)):
-                        temp = []
+                        tempo = []
                         for j in range(len(rl[i])):
-                            temp.append(rl[i][j])
+                            tempo.append(rl[i][j])
                         path = GH_Path(i)
-                        result.AddRange(temp, path)
+                        result.AddRange(tempo, path)
                     return result
 
                 @staticmethod
@@ -8805,13 +8937,11 @@ if date.today() > date(2020, 1, 1):
                 def seq_to_tree(text):
                     #sequence as text
                     seq = ast.literal_eval(text)
-                    steps = Toolbox.Data.seq_to_steps(seq)
                     deep = Toolbox.Data.deepest_steps(seq)
                     tree = DataTree[object]()
                     for i in range(len(deep)):
                         path = deep[i]
                         item = Toolbox.Data.get_item_from_path(seq, path)
-                        temp = [item]
                         tree.Add(item, GH_Path(*path))
                     return tree
 
@@ -8929,118 +9059,5 @@ if date.today() > date(2020, 1, 1):
                                 count += 1
                         else: new_seq += seq[i]
                     return new_seq
-
-
-        class Basics:
-            """Class of geometrical functions independant from the rhinocommon library"""
-
-        
-            @staticmethod
-            def length(v):
-                """ Compute vector length. """
-                return Basics.dot(v, v) ** .5
-
-            @staticmethod
-            def angle(v1, v2, w):
-                """ Compute angle beween two vectors. The angle is comprised within the [0;2pi] range. """
-
-                _ = sum([coord ** 2 for coord in v1]) ** .5  # v1 magnitude
-                v1 = [coord / _ for coord in v1]  # Unitize v1
-                _ = sum([coord ** 2 for coord in v2]) ** .5  # v2 magnitude
-                v2 = [coord / _ for coord in v2]  # Unitize v2
-
-                dot = v1[0] * v2[0] + v1[1] * v2[1] + v1[2] * v2[2]
-                det = (v1[1] * v2[2] - v1[2] * v2[1],
-                    v1[2] * v2[0] - v1[0] * v2[2],
-                    v1[0] * v2[1] - v1[1] * v2[0],)
-                det = sum([det_i ** 2. for det_i in det]) ** .5
-
-                angle = math.atan2(det, dot)
-                try:
-                    sign = sum([v_i * w_i for v_i, w_i in zip(v2, w)])
-                    sign /= abs(sign)
-                except:
-                    sign = 1
-                sign = 1
-                
-                return sign * angle
-
-            @staticmethod
-            def unitize(v):
-                v_length = Basics.length(v)
-                return tuple([vi / v_length for vi in v])
-
-            @staticmethod
-            def dot(v1, v2):
-                """Dot product of two vectors"""
-                return sum([a * b for a, b in zip(v1, v2)])
-
-            @staticmethod
-            def cross(v1, v2):
-                n = (v1[1] * v2[2] - v1[2] * v2[1],
-                    v1[2] * v2[0] - v1[0] * v2[2],
-                    v1[0] * v2[1] - v1[1] * v2[0])
-                return n
-
-            @staticmethod
-            def project(px, py, v, proj_dir):
-                """Project a vector on a plate defined by two axis with respect
-                to a projection vector"""
-                n = Basics.cross(px, py)
-
-                n_dot_proj_dir = Basics.dot(n, proj_dir)
-                
-                # If d is parallel to the plane, no projection is possible
-                if n_dot_proj_dir == 0:
-                    # But is ok is v in within the plane
-                    if Basics.dot(v, n) == 0:
-                        return v
-                    return []
-
-                # Position parameter of the projection
-                q = - Basics.dot(v, n) / n_dot_proj_dir
-
-                # v is already within the plane
-                if q == 0:
-                    return v
-
-                return tuple([vi + q * di for vi, di in zip(v, proj_dir)])
-
-            @staticmethod
-            def get_yks(vi, y, a, n):
-                ys_k = []
-
-                for i in range(n):
-                    ci = math.cos(0.5 * (math.pi - a) + a / (n - 1) * i)
-                    si = math.sin(0.5 * (math.pi - a) + a / (n - 1) * i)
-
-                    yix = (vi[0] ** 2 * (1 - ci) + ci) * y[0] + \
-                        (vi[0] * vi[1] * (1 - ci) - vi[2] * si) * y[1] + \
-                        (vi[0] * vi[2] * (1 - ci) + vi[1] * si) * y[2]
-
-                    yiy = (vi[0] * vi[1] * (1 - ci) + vi[2] * si) * y[0] + \
-                        (vi[1] ** 2 * (1 - ci) + ci) * y[1] + \
-                        (vi[1] * vi[2] * (1 - ci) - vi[0] * si) * y[2]
-
-                    yiz = (vi[0] * vi[2] * (1 - ci) - vi[1] * si) * y[0] + \
-                        (vi[1] * vi[2] * (1 - ci) + vi[0] * si) * y[1] + \
-                        (vi[2] ** 2 * (1 - ci) + ci) * y[2]
-
-                    ys_k.append((yix, yiy, yiz))
-
-                return tuple(ys_k[::-1])
-
-            @staticmethod
-            def flip_crv(top, bottom):
-                top14 = [[top[4 * i], top[4 * i + 3]] for i in range(len(top) // 4)]
-                top23 = [[top[4 * i + 1], top[4 * i + 2]] for i in range(len(top) // 4)]
-
-                bottom14 = [[bottom[4 * i], bottom[4 * i + 3]] for i in range(len(bottom) // 4)]
-                bottom23 = [[bottom[4 * i + 1], bottom[4 * i + 2]] for i in range(len(bottom) // 4)]
-
-                return ([item for sublits in [tuple([t[0]] + b + [t[1]])
-                                            for b, t in zip(bottom23, top23)] for item in sublits],
-                        [item for sublist in [tuple([t[0]] + b + [t[1]])
-                                            for b, t in zip(bottom14, top14)] for item in sublist])
 
         pass
