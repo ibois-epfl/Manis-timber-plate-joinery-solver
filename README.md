@@ -21,16 +21,25 @@ For research applications, please refer to the following publication. It include
 ## For users
 
 ### Plugin installation
-1. Download the file `Manis.ghpy`.
+1. Download the file `Manis.x.ghpy`.
 2. Place the file inside Grasshopper Components folder `C:\Users\yourname\AppData\Roaming\Grasshopper\Libraries` or `Grasshopper -> File -> Special folders -> Components folder`.
 3. Verify that the file is unblocked: `Right-click on the file -> Properties -> General -> Unblock`.
 4. Restart Rhino and open Grasshopper. There should be a new tab in Grasshopper named Manis.
 
 ### Plugin structure
-... coming soon...
+The plugin has eight different tabs:
+* _Adjacency_: where you can get useful data about how the plates of the model are connected. 
+* _Assembly_: where you can create your own insertion constraints and access plate modules properties.
+* _Joints_: where you can create different kind of joints between adjacent plates. 
+* _Properties_: where you can access the geometric properties of each plate (contour, face, thickness...).
+* _Robotics_: where you can simulate the robotic assembly of the plates using the plugin "robot".
+* _Solver_: where you can find the component to build the model and other computationally intensive solvers.
+* _Transform_: where you can rearrange the plates in the 3D space (for example for fabrication or assembly purposes).
+* _Utility_: where you can find other components that couldn't find a place in the other tabs...
 
-### Example files
-... coming soon...
+### Example file and tutorial
+The file `manis_demo.gh` contains some examples showing different applications of the joinery solver.
+A [video tutorial](https://vimeo.com/user87001008) is also available on IBOIS vimeo channel.
 
 ## For developers
 
