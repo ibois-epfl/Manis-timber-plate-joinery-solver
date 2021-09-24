@@ -61,7 +61,7 @@ The source code is split in 5 classes:
 * _Toolbox_: A list of methods extending the Rhino framework. 
 * _Basics_: A list of methods independant of the Rhino framework.
 
-### Re-compiling a new version of the plug-in
+### Re-compiling a new version of the plugin
 Once the modifications brought to the source code have been validated, a new version of the plugin can be generated.
 
 1. Download the folder `Grasshopper compilation files`.
