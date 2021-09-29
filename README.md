@@ -32,7 +32,7 @@ The plugin has eight different tabs:
 * _Assembly_: where you can create your own insertion constraints and access plate modules properties.
 * _Joints_: where you can create different kind of joints between adjacent plates. 
 * _Properties_: where you can access the geometric properties of each plate (contour, face, thickness...).
-* _Robotics_: where you can simulate the robotic assembly of the plates using the plugin "robot".
+* _Robotics_: where you can simulate the robotic assembly of the plates using the plugin ["Robots"](https://github.com/visose/Robots).
 * _Solver_: where you can find the component to build the model and other computationally intensive solvers.
 * _Transform_: where you can rearrange the plates in the 3D space (for example for fabrication or assembly purposes).
 * _Utility_: where you can find other components that couldn't find a place in the other tabs...
