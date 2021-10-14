@@ -46,7 +46,7 @@ The file `manis_demo.gh` contains some examples showing different applications o
 A video tutorial is also available on IBOIS vimeo channel. The [first part](https://vimeo.com/user87001008) focuses on the 3D modeling of the joints and the concept of modular assemblies while [the second part](https://vimeo.com/user87001008) covers the generation of CNC toolpath and robot trajectories.
 
 For a general overview of Manis workflow, you can refer to [this video](https://vimeo.com/user87001008) in which the solver is applied to a boxed vault of 36 plates.
-We also recorded a [detailed explanation](https://vimeo.com/user87001008) of the code that is behind the grasshopper component we use to perform the structural analysis of this doubly-curved timber vault.
+We also recorded a [detailed explanation](https://vimeo.com/user87001008) of the code that is behind the grasshopper component we use to perform the structural analysis of this doubly-curved timber vault. You can test it yourself by downloading the file `manis_annen.gh`
 
 ## For developers
 
@@ -80,5 +80,3 @@ Once the modifications brought to the source code have been validated, a new ver
 8. Restart Rhino and open Grasshopper. The plugin should be updated.
 
 For further information about how to create a custom grasshopper component with python, you can refer to [this tutorial](https://discourse.mcneel.com/t/tutorial-creating-a-grasshopper-component-with-the-python-ghpy-compiler/38552).
-
-
