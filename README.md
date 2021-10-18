@@ -26,7 +26,7 @@ For research applications, please refer to the following publication. It include
 
 ### Plugin installation
 1. Download the file `Manis.x.ghpy` and place it inside Grasshopper Components folder `C:\Users\yourname\AppData\Roaming\Grasshopper\Libraries` or `Grasshopper -> File -> Special folders -> Components folder`.
-2. Download the files inside the folder `Manis user objects` and place them inside the Grasshopper User Object folder `C:\Users\yourname\AppData\Roaming\Grasshopper\UserObjects` or `Grasshopper -> File -> Special folders -> User Object folder`.
+2. Download the files inside the folder `Gh user objects` and place them inside the Grasshopper User Object folder `C:\Users\yourname\AppData\Roaming\Grasshopper\UserObjects` or `Grasshopper -> File -> Special folders -> User Object folder`.
 3. Verify that all files are unblocked: `Right-click on the file -> Properties -> General -> Unblock`.
 4. Restart Rhino and open Grasshopper. There should be a new tab in Grasshopper named Manis.
 
