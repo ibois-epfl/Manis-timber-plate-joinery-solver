@@ -80,12 +80,10 @@ The source code is split in 4 classes:
 Once the modifications brought to the source code have been validated, a new version of the plugin can be generated.
 
 1. Download the folder `Grasshopper compilation files`.
-2. Open the file `build.py` in an editor and replace the 5 classes with their new version from the updated source code.
+2. Open the file `build.py` in an editor and replace the 4 classes with their new version from the updated source code.
 3. If necessary, update the parameters and/or the definition of the plugin components (each file corresponds to a single component of the plugin).
-4. In Rhino, run the command `_EditPythonScript` and open the file `main.py`.
-5. Update the version number of the plugin in the first argument of the function `clr.CompileModules(" Manis.x.ghpy"...`
-6. Run the file `main.py`. It will create a file `Manis.x.ghpy` in the folder `Grasshopper compilation files`.
-7. Move the newly created file to the Grasshopper Components folder `C:\Users\yourname\AppData\Roaming\Grasshopper\Libraries` or `Grasshopper -> File -> Special folders -> Components folder`.
-8. Restart Rhino and open Grasshopper. The plugin should be updated.
+4. In Rhino, run the command `_EditPythonScript` and run the file `main.py`. It will create a file `Manis.x.ghpy` in the folder `Grasshopper compilation files`.
+5. Move the newly created file to the Grasshopper Components folder `C:\Users\yourname\AppData\Roaming\Grasshopper\Libraries` or `Grasshopper -> File -> Special folders -> Components folder`.
+6. Restart Rhino and open Grasshopper. The plugin should be updated.
 
 For further information about how to create a custom grasshopper component with python, you can refer to [this tutorial](https://discourse.mcneel.com/t/tutorial-creating-a-grasshopper-component-with-the-python-ghpy-compiler/38552).
