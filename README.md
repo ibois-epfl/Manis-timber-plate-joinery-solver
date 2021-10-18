@@ -49,7 +49,7 @@ The plugin has 9 different tabs:
 * _Transform_: where you can rearrange the plates in the 3D space (for example for fabrication or assembly purposes).
 * _Utility_: where you can find other components that couldn't find a place in the other tabs...
 
-### Example file and tutorial
+### Example files and tutorials
 The file `manis_demo.gh` contains some examples showing different applications of the joinery solver.
 A video tutorial is also available on IBOIS vimeo channel. The [first part](https://vimeo.com/635110679) focuses on the 3D modeling of the joints and the concept of modular assemblies while [the second part](https://vimeo.com/635112019) covers the generation of CNC toolpath and robot trajectories.
 
