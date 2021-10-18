@@ -14,6 +14,7 @@ The tool allows:
 * generating joints geometry according to topological constraints and assembly sequence
 * generating CNC cutting toolpath to automate the fabrication of the plates
 * generating robotic trajectories to automate the assembly of the plates
+* generating finite element models suitable for structural analysis
 
 As images are often more powerfull than words, have a look at our [short trailer](https://vimeo.com/635101614) if you didn't see it yet!
 
