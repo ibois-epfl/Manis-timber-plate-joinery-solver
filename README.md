@@ -1,4 +1,4 @@
-# Manis -  A timber plate joinery solver
+# Manis -  A collaborative design tool for integrally-attached timber plate structures.
 
 * [Introduction](#introduction)
 * [For users](#for-users)
