@@ -61,7 +61,7 @@ class MyComponent(component):
 
         integer = None
         deci = None
-        if num:             
+        if num is not None:             
             st= str(num).split(".")
             integer = int(st[0])
             deci = float("0."+st[1])
